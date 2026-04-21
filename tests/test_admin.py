@@ -115,3 +115,46 @@ async def test_create_full_success(monkeypatch) -> None:
     data = response.json()
     assert data["status"] == "created"
     assert "tenant_id" in data
+
+
+@pytest.mark.asyncio
+async def test_create_full_google_sheets_success(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
+
+    mock_fetch = MagicMock(return_value=("Google Sheets Blueprint", "Snapshot data"))
+    monkeypatch.setattr(admin, "fetch_google_sheet_data", mock_fetch)
+
+    mock_create = AsyncMock(return_value="gs-tenant-uuid")
+    monkeypatch.setattr(admin, "create_tenant_record", mock_create)
+
+    mock_save = AsyncMock()
+    monkeypatch.setattr(admin, "save_tenant_credentials", mock_save)
+
+    response = client.post(
+        "/admin/tenant/create-full",
+        json={
+            "company_name": "Google Sheets Corp",
+            "active_modules": ["general"],
+            "db_type": "google_sheets",
+            "google_sheet_id": "test_sheet_id",
+            "google_credentials_json": '{"type": "service_account"}',
+            "ssl_required": False
+        },
+        headers={"x-admin-token": "secret"}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "created"
+    assert data["tenant_id"] == "gs-tenant-uuid"
+
+    mock_fetch.assert_called_once_with("test_sheet_id", '{"type": "service_account"}')
+    mock_save.assert_awaited_once()
+
+    call_kwargs = mock_save.call_args.kwargs
+    assert call_kwargs["tenant_id"] == "gs-tenant-uuid"
+    assert call_kwargs["db_type"] == "google_sheets"
+    assert call_kwargs["connection_url"] == "google_sheets://test_sheet_id"
+    assert call_kwargs["google_credentials"] == '{"type": "service_account"}'
+    assert call_kwargs["schema_blueprint"] == "Google Sheets Blueprint"
