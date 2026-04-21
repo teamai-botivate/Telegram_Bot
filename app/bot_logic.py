@@ -291,6 +291,30 @@ async def classify_intent(question: str, active_modules: list[str]) -> dict[str,
 
 async def handle_message(msg: BotMessage) -> None:
 	try:
+		# Magic Link Onboarding Hooks
+		text_upper = msg.text.strip().upper()
+		token = None
+		if msg.platform == "telegram" and text_upper.startswith("/START ") and len(msg.text.split()) > 1:
+			token = msg.text.strip().split(" ", 1)[1]
+		elif msg.platform == "whatsapp" and text_upper.startswith("START-"):
+			token = msg.text.strip().split("-", 1)[1]
+		
+		if token:
+			try:
+				import jwt, os
+				from .database import update_tenant_chat_id
+				secret = os.getenv("ADMIN_SECRET_TOKEN", "")
+				payload = jwt.decode(token, secret, algorithms=["HS256"])
+				tenant_id = payload.get("tenant_id")
+				if tenant_id:
+					await update_tenant_chat_id(tenant_id, msg.platform, msg.chat_id)
+					await send_reply(msg, "Welcome to Botivate! Your account is officially linked successfully. How can I assist you today?")
+					return
+			except Exception as e:
+				logger.error(f"Failed to process magic link token: {e}")
+				await send_reply(msg, "Sorry, your onboarding link is invalid or expired. Please request a new link.")
+				return
+
 		tenant = await get_tenant_by_chat_id(msg.chat_id)
 		if tenant is None:
 			await send_reply(msg, ACCOUNT_NOT_FOUND_MESSAGE)

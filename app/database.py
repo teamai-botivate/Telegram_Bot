@@ -289,3 +289,33 @@ async def execute_tenant_query(tenant_id: uuid.UUID | str, sql: str, *params: An
 		raise QueryExecutionError("An unexpected error occurred while running tenant query.")
 	finally:
 		await connection.close()
+
+
+async def create_tenant_record(company_name: str, active_modules: list[str]) -> uuid.UUID:
+	if session_factory is None:
+		raise RuntimeError("DATABASE_URL is not configured.")
+
+	tenant = Tenant(company_name=company_name, active_modules=active_modules)
+	async with session_factory() as session:
+		session.add(tenant)
+		await session.commit()
+		await session.refresh(tenant)
+		return tenant.id
+
+
+async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_id: str) -> None:
+	if session_factory is None:
+		return
+
+	tenant_uuid = uuid.UUID(str(tenant_id))
+	async with session_factory() as session:
+		tenant = await session.get(Tenant, tenant_uuid)
+		if tenant is None:
+			raise ValueError("Tenant not found.")
+
+		if platform.lower() == "telegram":
+			tenant.telegram_chat_id = chat_id
+		elif platform.lower() == "whatsapp":
+			tenant.whatsapp_number = chat_id
+
+		await session.commit()
