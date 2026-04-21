@@ -18,27 +18,29 @@ if config.config_file_name is not None:
 load_dotenv()
 
 
-def _get_migration_database_url() -> str:
+def _get_migration_database_url() -> tuple[str, dict]:
+    """Return a (url, connect_args) pair compatible with psycopg2 (used by Alembic)."""
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured. Set it in your .env file.")
 
     parsed = make_url(database_url)
-    drivername = parsed.drivername
 
-    if drivername in {"postgres", "postgresql"}:
-        return parsed.set(drivername="postgresql+psycopg2").render_as_string(hide_password=False)
+    # Strip asyncpg-only query params
+    query = dict(parsed.query)
+    ssl_val = query.pop("ssl", None)
 
-    if drivername in {"postgres+asyncpg", "postgresql+asyncpg"}:
-        return parsed.set(drivername="postgresql+psycopg2").render_as_string(hide_password=False)
+    connect_args = {}
+    if ssl_val == "require" or query.pop("sslmode", None) == "require":
+        connect_args["sslmode"] = "require"
 
-    if drivername.startswith("postgresql+") and drivername != "postgresql+psycopg2":
-        return parsed.set(drivername="postgresql+psycopg2").render_as_string(hide_password=False)
+    # Force psycopg2 driver (sync, used by Alembic)
+    parsed = parsed.set(drivername="postgresql+psycopg2", query=query)
+    return parsed.render_as_string(hide_password=False), connect_args
 
-    return database_url
 
-
-config.set_main_option("sqlalchemy.url", _get_migration_database_url())
+_migration_url, _connect_args = _get_migration_database_url()
+config.set_main_option("sqlalchemy.url", _migration_url)
 target_metadata = Base.metadata
 
 
@@ -61,6 +63,7 @@ def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=_connect_args,
     )
 
     with connectable.connect() as connection:

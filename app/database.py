@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from .models import Base, Tenant, TenantDBCredential, TenantSchemaMap
+from .models import Base, Tenant, TenantDBCredential
 
 load_dotenv()
 
@@ -113,21 +113,6 @@ async def get_tenant_credentials(tenant_id: uuid.UUID | str) -> TenantDBCredenti
 		return result.scalar_one_or_none()
 
 
-async def get_sql_template(tenant_id: uuid.UUID | str, module: str, intent: str) -> str | None:
-	if session_factory is None:
-		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
-
-	tenant_uuid = uuid.UUID(str(tenant_id))
-	statement = select(TenantSchemaMap.sql_template).where(
-		TenantSchemaMap.tenant_id == tenant_uuid,
-		TenantSchemaMap.module == module,
-		TenantSchemaMap.intent == intent,
-	)
-
-	async with session_factory() as session:
-		result = await session.execute(statement)
-		return result.scalar_one_or_none()
-
 
 async def get_active_modules(tenant_id: uuid.UUID) -> list[str]:
 	if session_factory is None:
@@ -148,9 +133,9 @@ async def get_active_modules(tenant_id: uuid.UUID) -> list[str]:
 async def save_tenant_credentials(
 	tenant_id: uuid.UUID | str,
 	db_type: str,
-	encrypted_fields: dict[str, str],
+	connection_url: str,
+	schema_blueprint: str | None = None,
 	ssl_required: bool = True,
-	schema_map: dict[str, str] | None = None,
 ) -> TenantDBCredential:
 	if session_factory is None:
 		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
@@ -170,65 +155,23 @@ async def save_tenant_credentials(
 			credential = TenantDBCredential(
 				tenant_id=tenant_uuid,
 				db_type=db_type,
-				host=encrypted_fields["host"],
-				port=encrypted_fields["port"],
-				database_name=encrypted_fields["database_name"],
-				db_user=encrypted_fields["db_user"],
-				db_password=encrypted_fields["db_password"],
+				connection_url=encrypt_credential_value(connection_url),
+				schema_blueprint=schema_blueprint,
 				ssl_required=ssl_required,
-				schema_map=schema_map,
 			)
 			session.add(credential)
 		else:
 			credential.db_type = db_type
-			credential.host = encrypted_fields["host"]
-			credential.port = encrypted_fields["port"]
-			credential.database_name = encrypted_fields["database_name"]
-			credential.db_user = encrypted_fields["db_user"]
-			credential.db_password = encrypted_fields["db_password"]
+			credential.connection_url = encrypt_credential_value(connection_url)
+			if schema_blueprint is not None:
+				credential.schema_blueprint = schema_blueprint
 			credential.ssl_required = ssl_required
-			credential.schema_map = schema_map
 
 		await session.commit()
 		await session.refresh(credential)
 
 		return credential
 
-
-async def save_schema_map(tenant_id: uuid.UUID | str, module: str, intent: str, sql_template: str) -> TenantSchemaMap:
-	if session_factory is None:
-		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
-
-	tenant_uuid = uuid.UUID(str(tenant_id))
-
-	async with session_factory() as session:
-		tenant = await session.get(Tenant, tenant_uuid)
-		if tenant is None:
-			raise ValueError("Tenant not found.")
-
-		statement = select(TenantSchemaMap).where(
-			TenantSchemaMap.tenant_id == tenant_uuid,
-			TenantSchemaMap.module == module,
-			TenantSchemaMap.intent == intent,
-		)
-		existing_result = await session.execute(statement)
-		schema_map_record = existing_result.scalar_one_or_none()
-
-		if schema_map_record is None:
-			schema_map_record = TenantSchemaMap(
-				tenant_id=tenant_uuid,
-				module=module,
-				intent=intent,
-				sql_template=sql_template,
-			)
-			session.add(schema_map_record)
-		else:
-			schema_map_record.sql_template = sql_template
-
-		await session.commit()
-		await session.refresh(schema_map_record)
-
-		return schema_map_record
 
 
 async def _touch_last_connected(credential_id: uuid.UUID) -> None:
@@ -253,21 +196,13 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 		raise TenantDBConnectionError("Only PostgreSQL tenant databases are currently supported.")
 
 	try:
-		host = _decrypt_credential_value(credential.host)
-		port = int(_decrypt_credential_value(credential.port))
-		database_name = _decrypt_credential_value(credential.database_name)
-		db_user = _decrypt_credential_value(credential.db_user)
-		db_password = _decrypt_credential_value(credential.db_password)
+		connection_string = _decrypt_credential_value(credential.connection_url)
 	except (InvalidToken, ValueError):
 		raise TenantDBConnectionError("Tenant database credentials are invalid or could not be decrypted.")
 
 	try:
 		connection = await asyncpg.connect(
-			host=host,
-			port=port,
-			user=db_user,
-			password=db_password,
-			database=database_name,
+			connection_string,
 			ssl="require" if credential.ssl_required else "prefer",
 			timeout=10,
 		)
@@ -319,3 +254,33 @@ async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_
 			tenant.whatsapp_number = chat_id
 
 		await session.commit()
+
+
+async def fetch_postgres_schema(connection_string: str) -> str:
+	try:
+		connection = await asyncpg.connect(connection_string, timeout=10)
+		sql = """
+		SELECT table_name, column_name, data_type
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		ORDER BY table_name, ordinal_position;
+		"""
+		rows = await connection.fetch(sql)
+		await connection.close()
+		
+		tables = {}
+		for row in rows:
+			t = row['table_name']
+			c = row['column_name']
+			d = row['data_type']
+			if t not in tables:
+				tables[t] = []
+			tables[t].append(f"{c} ({d})")
+			
+		blueprint = "Database Blueprint (PostgreSQL):\n"
+		for t, cols in tables.items():
+			blueprint += f"Table `{t}` | Columns: {', '.join(cols)}\n"
+			
+		return blueprint.strip()
+	except Exception as e:
+		raise ValueError(f"Failed to extract database blueprint: {e}")

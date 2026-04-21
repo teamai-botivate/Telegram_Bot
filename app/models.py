@@ -27,10 +27,6 @@ class Tenant(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
-    schema_maps: Mapped[list["TenantSchemaMap"]] = relationship(
-        back_populates="tenant",
-        cascade="all, delete-orphan",
-    )
 
 
 class TenantDBCredential(Base):
@@ -39,26 +35,15 @@ class TenantDBCredential(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     db_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    host: Mapped[str] = mapped_column(Text, nullable=False)
-    port: Mapped[str] = mapped_column(Text, nullable=False)
-    database_name: Mapped[str] = mapped_column(Text, nullable=False)
-    db_user: Mapped[str] = mapped_column(Text, nullable=False)
-    db_password: Mapped[str] = mapped_column(Text, nullable=False)
-    schema_map: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
+    
+    # Stores either Postgres DATABASE_URL or Google Sheet URL (Encrypted)
+    connection_url: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    # Stores the auto-discovered structural blueprint
+    schema_blueprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     ssl_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="credential")
 
-
-class TenantSchemaMap(Base):
-    __tablename__ = "tenant_schema_map"
-    __table_args__ = (UniqueConstraint("tenant_id", "module", "intent", name="uq_tenant_module_intent"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
-    module: Mapped[str] = mapped_column(String(64), nullable=False)
-    intent: Mapped[str] = mapped_column(String(64), nullable=False)
-    sql_template: Mapped[str] = mapped_column(Text, nullable=False)
-
-    tenant: Mapped[Tenant] = relationship(back_populates="schema_maps")

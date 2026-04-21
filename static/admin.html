@@ -4,173 +4,149 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Botivate Admin Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 40px; width: 100%; max-width: 580px; box-shadow: 0 25px 50px rgba(0,0,0,0.4); }
+        h1 { font-size: 1.5rem; font-weight: 700; color: #f1f5f9; margin-bottom: 6px; }
+        p.subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 32px; }
+        .divider { border: 0; border-top: 1px solid #334155; margin: 24px 0; }
+        label { display: block; font-size: 0.8rem; font-weight: 600; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+        input, select { width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 10px 14px; font-size: 0.9rem; font-family: inherit; transition: border-color 0.2s; outline: none; }
+        input:focus, select:focus { border-color: #6366f1; }
+        input::placeholder { color: #475569; font-size: 0.82rem; }
+        input[type="password"] { font-family: monospace; }
+        .field { margin-bottom: 20px; }
+        .hint { font-size: 0.75rem; color: #64748b; margin-top: 5px; }
+        .db-type-badge { display: flex; gap: 8px; margin-bottom: 20px; }
+        .db-type-badge button { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: transparent; color: #94a3b8; font-size: 0.875rem; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+        .db-type-badge button.active { background: #312e81; border-color: #6366f1; color: #a5b4fc; font-weight: 600; }
+        .btn-primary { width: 100%; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; font-weight: 600; border: none; border-radius: 8px; padding: 12px; font-size: 1rem; cursor: pointer; transition: opacity 0.2s; font-family: inherit; margin-top: 8px; }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+        .result-box { margin-top: 28px; background: #0f2a1e; border: 1px solid #16a34a; border-radius: 12px; padding: 20px; display: none; }
+        .result-box h3 { color: #4ade80; font-size: 1rem; margin-bottom: 8px; }
+        .result-box p { color: #86efac; font-size: 0.85rem; margin-bottom: 12px; }
+        .link-row { background: #0a1e13; border: 1px solid #166534; border-radius: 8px; padding: 12px; display: flex; align-items: center; gap: 10px; }
+        .link-text { font-family: monospace; font-size: 0.75rem; color: #a7f3d0; flex: 1; word-break: break-all; }
+        .copy-btn { background: #166534; border: none; color: #4ade80; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; white-space: nowrap; }
+        .error-box { margin-top: 24px; background: #2a0f0f; border: 1px solid #dc2626; border-radius: 12px; padding: 16px; display: none; color: #f87171; font-size: 0.875rem; }
     </style>
 </head>
-<body class="text-slate-800">
-    <div class="max-w-4xl mx-auto p-6 md:p-12">
-        <header class="mb-10 text-center">
-            <h1 class="text-3xl font-bold text-slate-900">Tenant Provisioning</h1>
-            <p class="text-slate-500 mt-2">Create a new Botivate client and map their database.</p>
-        </header>
+<body>
+    <div class="card">
+        <h1>🚀 Tenant Provisioning</h1>
+        <p class="subtitle">Add a client and generate their onboarding magic link.</p>
 
-        <form id="provision-form" class="space-y-8 bg-white p-8 rounded-2xl shadow-sm border border-slate-200">
+        <form id="provision-form">
             <!-- Auth -->
-            <div>
-                <h2 class="text-lg font-semibold text-slate-900 border-b pb-2 mb-4">Authentication</h2>
-                <label class="block text-sm font-medium mb-1">Admin Secret Token</label>
-                <input type="password" id="adminToken" required class="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+            <div class="field">
+                <label>Admin Secret Token</label>
+                <input type="password" id="adminToken" required placeholder="zdjxmZm3nRn...">
             </div>
 
-            <!-- Step 1 -->
-            <div>
-                <h2 class="text-lg font-semibold text-slate-900 border-b pb-2 mb-4">Step 1: Tenant Core Details</h2>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Company Name</label>
-                        <input type="text" id="companyName" required placeholder="Acme Corp" class="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 hover:border-blue-300 outline-none">
-                    </div>
-                </div>
+            <hr class="divider">
+
+            <!-- Company -->
+            <div class="field">
+                <label>Company Name</label>
+                <input type="text" id="companyName" required placeholder="Acme Corp Pvt. Ltd.">
             </div>
 
-            <!-- Step 2 -->
-            <div>
-                <h2 class="text-lg font-semibold text-slate-900 border-b pb-2 mb-4">Step 2: Database Connection</h2>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div class="col-span-1 md:col-span-2">
-                        <label class="block text-sm font-medium mb-1">Database Type</label>
-                        <select id="dbType" class="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 hover:border-blue-300 outline-none">
-                            <option value="postgresql">PostgreSQL</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Host</label>
-                        <input type="text" id="host" required placeholder="ep-...neon.tech" class="w-full border border-slate-300 rounded-lg p-2.5">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Port</label>
-                        <input type="number" id="port" required value="5432" class="w-full border border-slate-300 rounded-lg p-2.5">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">Database Name</label>
-                        <input type="text" id="dbName" required class="w-full border border-slate-300 rounded-lg p-2.5">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1">DB User</label>
-                        <input type="text" id="dbUser" required class="w-full border border-slate-300 rounded-lg p-2.5">
-                    </div>
-                    <div class="col-span-1 md:col-span-2">
-                        <label class="block text-sm font-medium mb-1">DB Password</label>
-                        <input type="password" id="dbPassword" required class="w-full border border-slate-300 rounded-lg p-2.5">
-                    </div>
-                </div>
+            <!-- DB Type -->
+            <label>Database Provider</label>
+            <div class="db-type-badge">
+                <button type="button" class="active" data-type="postgresql" onclick="setDbType('postgresql', this)">Supabase / AWS PostgreSQL</button>
+                <button type="button" data-type="google_sheets" onclick="setDbType('google_sheets', this)">Google Sheets</button>
             </div>
 
-            <!-- Step 3 -->
-            <div>
-                <h2 class="text-lg font-semibold text-slate-900 border-b pb-2 mb-4">Step 3: Schema Mapping</h2>
-                <div id="schema-maps" class="space-y-4">
-                    <!-- Template Map -->
-                    <div class="schema-map-item bg-slate-50 p-4 border border-slate-200 rounded-lg">
-                        <div class="grid grid-cols-2 gap-4 mb-2">
-                            <input type="text" class="map-module border p-2 rounded" placeholder="Module (e.g. minutes_of_meeting)" required>
-                            <input type="text" class="map-intent border p-2 rounded" placeholder="Intent (e.g. meeting_schedule)" required>
-                        </div>
-                        <textarea class="map-sql w-full border p-2 rounded font-mono text-sm" rows="3" placeholder="SELECT status FROM tbl_meetings WHERE employee_name = $1" required></textarea>
-                    </div>
-                </div>
-                <button type="button" id="add-map-btn" class="mt-2 text-blue-600 font-medium text-sm hover:underline">+ Add another SQL map</button>
+            <!-- Connection URL -->
+            <div class="field">
+                <label>Connection URL</label>
+                <input type="text" id="connectionUrl" required placeholder="postgresql://user:pass@host/dbname">
+                <p class="hint" id="url-hint">Paste your Supabase <code>DATABASE_URL</code> or AWS RDS connection string directly.</p>
             </div>
 
-            <button type="submit" id="submit-btn" class="w-full bg-slate-900 text-white font-semibold rounded-lg p-3 hover:bg-slate-800 transition-colors">
-                Provision Tenant & Generate Portal Link
-            </button>
+            <button type="submit" id="submit-btn" class="btn-primary">Provision Tenant & Generate Link →</button>
         </form>
 
-        <div id="result" class="hidden mt-8 bg-green-50 border border-green-200 rounded-2xl p-6 text-center">
-            <h3 class="text-xl font-bold text-green-800 mb-2">Tenant Provisioned!</h3>
-            <p class="text-green-700 mb-4">Send this magic onboarding link to your client:</p>
-            <div class="bg-white border rounded-lg p-4 font-mono text-sm break-all flex items-center justify-between text-left">
-                <span id="magic-link" class="text-slate-600"></span>
-                <button onclick="navigator.clipboard.writeText(document.getElementById('magic-link').innerText)" class="ml-4 bg-slate-100 px-3 py-1 rounded hover:bg-slate-200">Copy</button>
+        <div class="result-box" id="result">
+            <h3>✅ Tenant Provisioned!</h3>
+            <p>Send this magic link to your client:</p>
+            <div class="link-row">
+                <span class="link-text" id="magic-link"></span>
+                <button class="copy-btn" onclick="copyLink()">Copy</button>
             </div>
         </div>
 
-        <div id="error" class="hidden mt-8 bg-red-50 border border-red-200 rounded-2xl p-6 text-center text-red-700"></div>
+        <div class="error-box" id="error-box"></div>
     </div>
 
     <script>
-        document.getElementById('add-map-btn').addEventListener('click', () => {
-            const container = document.getElementById('schema-maps');
-            const clone = container.firstElementChild.cloneNode(true);
-            clone.querySelectorAll('input, textarea').forEach(input => input.value = '');
-            container.appendChild(clone);
-        });
+        let selectedDbType = 'postgresql';
+
+        function setDbType(type, btn) {
+            selectedDbType = type;
+            document.querySelectorAll('.db-type-badge button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            const urlInput = document.getElementById('connectionUrl');
+            const hint = document.getElementById('url-hint');
+            if (type === 'google_sheets') {
+                urlInput.placeholder = 'https://docs.google.com/spreadsheets/d/...';
+                hint.textContent = 'Paste the Google Sheets sharing URL.';
+            } else {
+                urlInput.placeholder = 'postgresql://user:pass@host/dbname';
+                hint.innerHTML = 'Paste your Supabase <code>DATABASE_URL</code> or AWS RDS connection string directly.';
+            }
+        }
+
+        function copyLink() {
+            navigator.clipboard.writeText(document.getElementById('magic-link').textContent);
+        }
 
         document.getElementById('provision-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('submit-btn');
-            btn.innerText = 'Testing Database & Provisioning...';
+            const result = document.getElementById('result');
+            const errBox = document.getElementById('error-box');
+            result.style.display = 'none';
+            errBox.style.display = 'none';
+            btn.textContent = 'Discovering schema & provisioning...';
             btn.disabled = true;
-            document.getElementById('result').classList.add('hidden');
-            document.getElementById('error').classList.add('hidden');
 
             const token = document.getElementById('adminToken').value;
 
-            // Extract modules from schema maps uniquely
-            const schemaMapItems = Array.from(document.querySelectorAll('.schema-map-item'));
-            const activeModules = [...new Set(schemaMapItems.map(item => item.querySelector('.map-module').value))];
-            
-            const schema_maps = schemaMapItems.map(item => ({
-                module: item.querySelector('.map-module').value,
-                intent: item.querySelector('.map-intent').value,
-                sql_template: item.querySelector('.map-sql').value
-            }));
-
-            const payload = {
-                company_name: document.getElementById('companyName').value,
-                active_modules: activeModules,
-                db_type: document.getElementById('dbType').value,
-                host: document.getElementById('host').value,
-                port: parseInt(document.getElementById('port').value),
-                database_name: document.getElementById('dbName').value,
-                db_user: document.getElementById('dbUser').value,
-                db_password: document.getElementById('dbPassword').value,
-                ssl_required: true,
-                schema_maps: schema_maps
-            };
-
             try {
-                // 1. Create full tenant
                 const createRes = await fetch('/admin/tenant/create-full', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify({
+                        company_name: document.getElementById('companyName').value,
+                        active_modules: ['general'],
+                        db_type: selectedDbType,
+                        connection_url: document.getElementById('connectionUrl').value,
+                        ssl_required: true,
+                    })
                 });
-                
-                if (!createRes.ok) throw new Error((await createRes.json()).detail || 'Failed to create tenant');
-                const tenantId = (await createRes.json()).tenant_id;
 
-                // 2. Generate link
-                const linkRes = await fetch(`/admin/tenant/${tenantId}/generate-link`, {
+                if (!createRes.ok) throw new Error((await createRes.json()).detail || 'Failed to create tenant');
+                const { tenant_id } = await createRes.json();
+
+                const linkRes = await fetch(`/admin/tenant/${tenant_id}/generate-link`, {
                     method: 'POST',
                     headers: { 'x-admin-token': token }
                 });
-
                 if (!linkRes.ok) throw new Error('Failed to generate magic link');
-                const jwt = (await linkRes.json()).token;
+                const { token: jwt } = await linkRes.json();
 
-                // Success!
-                document.getElementById('result').classList.remove('hidden');
-                document.getElementById('magic-link').innerText = `${window.location.origin}/static/portal.html?token=${jwt}`;
+                document.getElementById('magic-link').textContent = `${location.origin}/static/portal.html?token=${jwt}`;
+                result.style.display = 'block';
             } catch (err) {
-                document.getElementById('error').innerText = err.message;
-                document.getElementById('error').classList.remove('hidden');
+                errBox.textContent = `❌ ${err.message}`;
+                errBox.style.display = 'block';
             } finally {
-                btn.innerText = 'Provision Tenant & Generate Portal Link';
+                btn.textContent = 'Provision Tenant & Generate Link →';
                 btn.disabled = false;
             }
         });
