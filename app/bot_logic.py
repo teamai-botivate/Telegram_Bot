@@ -253,7 +253,9 @@ async def classify_intent(question: str, active_modules: list[str]) -> dict[str,
 	classification_system_prompt = (
 		"You are an intent classifier for Botivate.\n\n"
 		f"Available modules and capabilities:\n{module_capabilities}\n\n"
-		"Classify the user question into the best module and intent.\n"
+		"Valid intents for minutes_of_meeting: meeting_schedule, task_status.\n"
+		"Valid intents for delivery_tracker: delivery_status.\n\n"
+		"Classify the user question into the best module and ONLY use the exact valid intent strings listed above.\n"
 		"Return ONLY valid JSON with this shape:\n"
 		'{"module": "string", "intent": "string", "entities": {"names": [], "dates": [], "statuses": []}}\n'
 		f"module must be one of: {', '.join(modules)}.\n"
