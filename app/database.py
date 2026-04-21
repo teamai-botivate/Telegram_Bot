@@ -136,6 +136,7 @@ async def save_tenant_credentials(
 	connection_url: str,
 	schema_blueprint: str | None = None,
 	ssl_required: bool = True,
+	google_credentials: str | None = None,
 ) -> TenantDBCredential:
 	if session_factory is None:
 		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
@@ -151,21 +152,27 @@ async def save_tenant_credentials(
 		existing_result = await session.execute(statement)
 		credential = existing_result.scalar_one_or_none()
 
+		encrypted_url = encrypt_credential_value(connection_url)
+		encrypted_creds = encrypt_credential_value(google_credentials) if google_credentials else None
+
 		if credential is None:
 			credential = TenantDBCredential(
 				tenant_id=tenant_uuid,
 				db_type=db_type,
-				connection_url=encrypt_credential_value(connection_url),
+				connection_url=encrypted_url,
 				schema_blueprint=schema_blueprint,
 				ssl_required=ssl_required,
+				google_credentials=encrypted_creds,
 			)
 			session.add(credential)
 		else:
 			credential.db_type = db_type
-			credential.connection_url = encrypt_credential_value(connection_url)
+			credential.connection_url = encrypted_url
 			if schema_blueprint is not None:
 				credential.schema_blueprint = schema_blueprint
 			credential.ssl_required = ssl_required
+			if encrypted_creds:
+				credential.google_credentials = encrypted_creds
 
 		await session.commit()
 		await session.refresh(credential)
@@ -284,3 +291,44 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		return blueprint.strip()
 	except Exception as e:
 		raise ValueError(f"Failed to extract database blueprint: {e}")
+
+
+def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:
+	"""Connect to Google Sheets and return (blueprint, data_snapshot) strings."""
+	import json
+	import gspread
+	from google.oauth2.service_account import Credentials
+
+	scopes = [
+		"https://www.googleapis.com/auth/spreadsheets.readonly",
+		"https://www.googleapis.com/auth/drive.readonly",
+	]
+
+	creds_dict = json.loads(credentials_json)
+	creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+	client = gspread.authorize(creds)
+
+	spreadsheet = client.open_by_key(sheet_id)
+
+	blueprint_lines: list[str] = []
+	snapshot_lines: list[str] = []
+
+	for worksheet in spreadsheet.worksheets():
+		title = worksheet.title
+		all_values = worksheet.get_all_values()
+
+		if not all_values:
+			blueprint_lines.append(f"Sheet `{title}` | (empty)")
+			continue
+
+		headers = all_values[0]
+		blueprint_lines.append(f"Sheet `{title}` | Columns: {', '.join(headers)}")
+
+		# Include first 50 rows as a snapshot to give the LLM real data context
+		for row in all_values[1:51]:
+			row_dict = dict(zip(headers, row))
+			snapshot_lines.append(f"{title}: {row_dict}")
+
+	blueprint = "Database Blueprint (Google Sheets):\n" + "\n".join(blueprint_lines)
+	snapshot = "\n".join(snapshot_lines)
+	return blueprint, snapshot

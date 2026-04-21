@@ -38,7 +38,10 @@ class TenantDBCredential(Base):
     
     # Stores either Postgres DATABASE_URL or Google Sheet URL (Encrypted)
     connection_url: Mapped[str] = mapped_column(Text, nullable=False)
-    
+
+    # Google Sheets only: encrypted service account JSON string
+    google_credentials: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Stores the auto-discovered structural blueprint
     schema_blueprint: Mapped[str | None] = mapped_column(Text, nullable=True)
 

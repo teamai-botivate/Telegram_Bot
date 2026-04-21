@@ -13,3 +13,5 @@ pytest-asyncio
 respx
 pyjwt
 greenlet
+gspread
+google-auth

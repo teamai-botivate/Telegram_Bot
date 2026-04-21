@@ -164,8 +164,44 @@ async def handle_message(msg: BotMessage) -> None:
             await send_reply(msg, reply)
             
         elif credentials.db_type.lower() == "google_sheets":
-            # PLACEHOLDER for google sheets parsing
-            await send_reply(msg, "Google Sheets discovery is currently processing.")
+            # Decrypt sheet ID and service account credentials
+            from .database import _decrypt_credential_value, fetch_google_sheet_data
+            from cryptography.fernet import InvalidToken
+            try:
+                decrypted_url = _decrypt_credential_value(credentials.connection_url)
+                sheet_id = decrypted_url.replace("google_sheets://", "")
+                creds_json = _decrypt_credential_value(credentials.google_credentials) if credentials.google_credentials else None
+            except (InvalidToken, Exception):
+                await send_reply(msg, "Your Google Sheets credentials could not be decrypted. Please contact support.")
+                return
+
+            if not creds_json:
+                await send_reply(msg, "Google Sheets credentials are not configured.")
+                return
+
+            try:
+                blueprint, data_snapshot = fetch_google_sheet_data(sheet_id, creds_json)
+            except Exception as e:
+                logger.error(f"Google Sheets fetch failed: {e}")
+                await send_reply(msg, "I couldn't access your Google Sheet right now. Please try again.")
+                return
+
+            # Use LLM to answer directly from the snapshot data
+            system_prompt = (
+                f"You are the customer assistant for {tenant.company_name}.\n"
+                f"Database Schema: {blueprint}\n\n"
+                f"Live Data (first 50 rows per sheet):\n{data_snapshot}\n\n"
+                "Instructions:\n"
+                "- Answer the user's question using ONLY the data above.\n"
+                "- Be concise and friendly.\n"
+                "- Reply in exactly the same language the user wrote in."
+            )
+            reply = await _call_mistral([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": msg.text}
+            ], max_tokens=500)
+            await send_reply(msg, reply or "I couldn't generate a response.")
+
             
     except Exception:
         logger.exception("Failed to process customer message for chat_id %s", msg.chat_id)

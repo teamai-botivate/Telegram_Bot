@@ -1,49 +1,301 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Botivate Admin Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
-        .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 40px; width: 100%; max-width: 580px; box-shadow: 0 25px 50px rgba(0,0,0,0.4); }
-        h1 { font-size: 1.5rem; font-weight: 700; color: #f1f5f9; margin-bottom: 6px; }
-        p.subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 32px; }
-        .divider { border: 0; border-top: 1px solid #334155; margin: 24px 0; }
-        label { display: block; font-size: 0.8rem; font-weight: 600; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
-        input, select { width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 10px 14px; font-size: 0.9rem; font-family: inherit; transition: border-color 0.2s; outline: none; }
-        input:focus, select:focus { border-color: #6366f1; }
-        input::placeholder { color: #475569; font-size: 0.82rem; }
-        input[type="password"] { font-family: monospace; }
-        .field { margin-bottom: 20px; }
-        .hint { font-size: 0.75rem; color: #64748b; margin-top: 5px; }
-        .db-type-badge { display: flex; gap: 8px; margin-bottom: 20px; }
-        .db-type-badge button { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: transparent; color: #94a3b8; font-size: 0.875rem; cursor: pointer; transition: all 0.2s; font-family: inherit; }
-        .db-type-badge button.active { background: #312e81; border-color: #6366f1; color: #a5b4fc; font-weight: 600; }
-        .btn-primary { width: 100%; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; font-weight: 600; border: none; border-radius: 8px; padding: 12px; font-size: 1rem; cursor: pointer; transition: opacity 0.2s; font-family: inherit; margin-top: 8px; }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-        .result-box { margin-top: 28px; background: #0f2a1e; border: 1px solid #16a34a; border-radius: 12px; padding: 20px; display: none; }
-        .result-box h3 { color: #4ade80; font-size: 1rem; margin-bottom: 8px; }
-        .result-box p { color: #86efac; font-size: 0.85rem; margin-bottom: 12px; }
-        .link-row { background: #0a1e13; border: 1px solid #166534; border-radius: 8px; padding: 12px; display: flex; align-items: center; gap: 10px; }
-        .link-text { font-family: monospace; font-size: 0.75rem; color: #a7f3d0; flex: 1; word-break: break-all; }
-        .copy-btn { background: #166534; border: none; color: #4ade80; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; white-space: nowrap; }
-        .error-box { margin-top: 24px; background: #2a0f0f; border: 1px solid #dc2626; border-radius: 12px; padding: 16px; display: none; color: #f87171; font-size: 0.875rem; }
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 16px;
+            padding: 40px;
+            width: 100%;
+            max-width: 600px;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.4);
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #f1f5f9;
+            margin-bottom: 6px;
+        }
+
+        p.subtitle {
+            color: #94a3b8;
+            font-size: 0.875rem;
+            margin-bottom: 32px;
+        }
+
+        hr.divider {
+            border: 0;
+            border-top: 1px solid #334155;
+            margin: 24px 0;
+        }
+
+        label {
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #94a3b8;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            color: #e2e8f0;
+            padding: 10px 14px;
+            font-size: 0.9rem;
+            font-family: inherit;
+            transition: border-color 0.2s;
+            outline: none;
+            resize: vertical;
+        }
+
+        input:focus,
+        select:focus,
+        textarea:focus {
+            border-color: #6366f1;
+        }
+
+        input::placeholder,
+        textarea::placeholder {
+            color: #475569;
+            font-size: 0.82rem;
+        }
+
+        .field {
+            margin-bottom: 20px;
+        }
+
+        .hint {
+            font-size: 0.75rem;
+            color: #64748b;
+            margin-top: 5px;
+            line-height: 1.5;
+        }
+
+        .hint code {
+            background: #0f172a;
+            border-radius: 4px;
+            padding: 1px 5px;
+            color: #a5b4fc;
+        }
+
+        .db-type-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+
+        .db-type-btn {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: transparent;
+            color: #94a3b8;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .db-type-btn .icon {
+            font-size: 1.2rem;
+        }
+
+        .db-type-btn:hover {
+            border-color: #6366f1;
+            color: #e2e8f0;
+        }
+
+        .db-type-btn.active {
+            background: #1e1b4b;
+            border-color: #6366f1;
+            color: #a5b4fc;
+        }
+
+        .form-section {
+            display: none;
+        }
+
+        .form-section.active {
+            display: block;
+        }
+
+        .file-upload-area {
+            border: 2px dashed #334155;
+            border-radius: 10px;
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #0f172a;
+        }
+
+        .file-upload-area:hover {
+            border-color: #6366f1;
+            background: #1e1b4b22;
+        }
+
+        .file-upload-area.has-file {
+            border-color: #22c55e;
+            background: #052e1622;
+        }
+
+        .upload-icon {
+            font-size: 2rem;
+            margin-bottom: 8px;
+        }
+
+        .upload-text {
+            color: #94a3b8;
+            font-size: 0.875rem;
+        }
+
+        .upload-filename {
+            color: #4ade80;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-top: 6px;
+        }
+
+        .btn-primary {
+            width: 100%;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            padding: 13px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            font-family: inherit;
+            margin-top: 4px;
+        }
+
+        .btn-primary:hover {
+            opacity: 0.9;
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .result-box {
+            margin-top: 28px;
+            background: #0f2a1e;
+            border: 1px solid #16a34a;
+            border-radius: 12px;
+            padding: 20px;
+            display: none;
+        }
+
+        .result-box h3 {
+            color: #4ade80;
+            font-size: 1rem;
+            margin-bottom: 8px;
+        }
+
+        .result-box p {
+            color: #86efac;
+            font-size: 0.85rem;
+            margin-bottom: 12px;
+        }
+
+        .link-row {
+            background: #0a1e13;
+            border: 1px solid #166534;
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .link-text {
+            font-family: monospace;
+            font-size: 0.72rem;
+            color: #a7f3d0;
+            flex: 1;
+            word-break: break-all;
+        }
+
+        .copy-btn {
+            background: #166534;
+            border: none;
+            color: #4ade80;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            font-family: inherit;
+        }
+
+        .copy-btn:hover {
+            background: #15803d;
+        }
+
+        .error-box {
+            margin-top: 24px;
+            background: #2a0f0f;
+            border: 1px solid #dc2626;
+            border-radius: 12px;
+            padding: 16px;
+            display: none;
+            color: #f87171;
+            font-size: 0.875rem;
+        }
     </style>
 </head>
+
 <body>
     <div class="card">
-        <h1>🚀 Tenant Provisioning</h1>
-        <p class="subtitle">Add a client and generate their onboarding magic link.</p>
+        <h1>Tenant Provisioning</h1>
+        <p class="subtitle">Add a new Botivate client and generate their onboarding magic link.</p>
 
         <form id="provision-form">
             <!-- Auth -->
             <div class="field">
                 <label>Admin Secret Token</label>
-                <input type="password" id="adminToken" required placeholder="zdjxmZm3nRn...">
+                <input type="password" id="adminToken" required placeholder="Your ADMIN_SECRET_TOKEN">
             </div>
 
             <hr class="divider">
@@ -54,26 +306,65 @@
                 <input type="text" id="companyName" required placeholder="Acme Corp Pvt. Ltd.">
             </div>
 
-            <!-- DB Type -->
-            <label>Database Provider</label>
-            <div class="db-type-badge">
-                <button type="button" class="active" data-type="postgresql" onclick="setDbType('postgresql', this)">Supabase / AWS PostgreSQL</button>
-                <button type="button" data-type="google_sheets" onclick="setDbType('google_sheets', this)">Google Sheets</button>
+            <!-- DB Type picker -->
+            <label>Database / Data Source</label>
+            <div class="db-type-grid" style="margin-top: 8px;">
+                <button type="button" class="db-type-btn active" data-type="postgresql"
+                    onclick="setDbType('postgresql', this)">
+                    <!-- <span class="icon">🐘</span> -->
+                    <div><strong>PostgreSQL</strong><br><small>Supabase / AWS RDS</small></div>
+                </button>
+                <button type="button" class="db-type-btn" data-type="google_sheets"
+                    onclick="setDbType('google_sheets', this)">
+                    <!-- <span class="icon">📊</span> -->
+                    <div><strong>Google Sheets</strong><br><small>Any Google Spreadsheet</small></div>
+                </button>
             </div>
 
-            <!-- Connection URL -->
-            <div class="field">
-                <label>Connection URL</label>
-                <input type="text" id="connectionUrl" required placeholder="postgresql://user:pass@host/dbname">
-                <p class="hint" id="url-hint">Paste your Supabase <code>DATABASE_URL</code> or AWS RDS connection string directly.</p>
+            <!-- PostgreSQL Section -->
+            <div class="form-section active" id="pg-section">
+                <div class="field">
+                    <label>PostgreSQL Connection URL</label>
+                    <input type="text" id="connectionUrl"
+                        placeholder="postgresql://user:pass@db.supabase.co:5432/postgres">
+                    <p class="hint">Paste your Supabase <code>DATABASE_URL</code> or AWS RDS connection string. Botivate
+                        will scan the schema automatically.</p>
+                </div>
             </div>
 
-            <button type="submit" id="submit-btn" class="btn-primary">Provision Tenant & Generate Link →</button>
+            <!-- Google Sheets Section -->
+            <div class="form-section" id="gs-section">
+                <div class="field">
+                    <label>Google Sheet ID</label>
+                    <input type="text" id="sheetId" placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms">
+                    <p class="hint">Found in the sheet URL:
+                        <code>docs.google.com/spreadsheets/d/<strong>SHEET_ID</strong>/edit</code>
+                    </p>
+                </div>
+                <div class="field">
+                    <label>Google Service Account Credentials</label>
+                    <input type="file" id="credentialsFile" accept=".json" style="display:none"
+                        onchange="handleFileUpload(this)">
+                    <div class="file-upload-area" id="upload-area"
+                        onclick="document.getElementById('credentialsFile').click()">
+                        <div class="upload-icon">📎</div>
+                        <div class="upload-text">Click to upload <code>google_credentials.json</code></div>
+                        <div class="upload-filename" id="upload-filename" style="display:none"></div>
+                    </div>
+                    <p class="hint">Download from <strong>Google Cloud Console → IAM → Service Accounts → Keys</strong>.
+                        Must have <code>Sheets</code> and <code>Drive</code> read access and be shared as viewer on the
+                        spreadsheet.</p>
+                </div>
+            </div>
+
+            <button type="submit" id="submit-btn" class="btn-primary">
+                Provision Tenant & Generate Magic Link →
+            </button>
         </form>
 
         <div class="result-box" id="result">
             <h3>✅ Tenant Provisioned!</h3>
-            <p>Send this magic link to your client:</p>
+            <p>Send this magic onboarding link to your client:</p>
             <div class="link-row">
                 <span class="link-text" id="magic-link"></span>
                 <button class="copy-btn" onclick="copyLink()">Copy</button>
@@ -85,20 +376,41 @@
 
     <script>
         let selectedDbType = 'postgresql';
+        let credentialsJsonContent = null;
 
         function setDbType(type, btn) {
             selectedDbType = type;
-            document.querySelectorAll('.db-type-badge button').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.db-type-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            const urlInput = document.getElementById('connectionUrl');
-            const hint = document.getElementById('url-hint');
-            if (type === 'google_sheets') {
-                urlInput.placeholder = 'https://docs.google.com/spreadsheets/d/...';
-                hint.textContent = 'Paste the Google Sheets sharing URL.';
-            } else {
-                urlInput.placeholder = 'postgresql://user:pass@host/dbname';
-                hint.innerHTML = 'Paste your Supabase <code>DATABASE_URL</code> or AWS RDS connection string directly.';
-            }
+            document.getElementById('pg-section').classList.toggle('active', type === 'postgresql');
+            document.getElementById('gs-section').classList.toggle('active', type === 'google_sheets');
+
+            // Toggle required attrs
+            document.getElementById('connectionUrl').required = (type === 'postgresql');
+            document.getElementById('sheetId').required = (type === 'google_sheets');
+        }
+
+        function handleFileUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    JSON.parse(e.target.result); // Validate JSON
+                    credentialsJsonContent = e.target.result;
+                    const area = document.getElementById('upload-area');
+                    area.classList.add('has-file');
+                    const fname = document.getElementById('upload-filename');
+                    fname.textContent = `✅ ${file.name}`;
+                    fname.style.display = 'block';
+                    area.querySelector('.upload-text').textContent = 'File loaded. Click to replace.';
+                } catch {
+                    alert('Invalid JSON file. Please upload a valid google_credentials.json.');
+                    credentialsJsonContent = null;
+                }
+            };
+            reader.readAsText(file);
         }
 
         function copyLink() {
@@ -112,24 +424,40 @@
             const errBox = document.getElementById('error-box');
             result.style.display = 'none';
             errBox.style.display = 'none';
-            btn.textContent = 'Discovering schema & provisioning...';
+
+            if (selectedDbType === 'google_sheets' && !credentialsJsonContent) {
+                errBox.textContent = '❌ Please upload a google_credentials.json file.';
+                errBox.style.display = 'block';
+                return;
+            }
+
+            btn.textContent = selectedDbType === 'google_sheets'
+                ? 'Connecting to Google Sheets & discovering schema...'
+                : 'Discovering schema & provisioning...';
             btn.disabled = true;
 
             const token = document.getElementById('adminToken').value;
+
+            const body = {
+                company_name: document.getElementById('companyName').value,
+                active_modules: ['general'],
+                db_type: selectedDbType,
+                ssl_required: true,
+            };
+
+            if (selectedDbType === 'postgresql') {
+                body.connection_url = document.getElementById('connectionUrl').value;
+            } else {
+                body.google_sheet_id = document.getElementById('sheetId').value;
+                body.google_credentials_json = credentialsJsonContent;
+            }
 
             try {
                 const createRes = await fetch('/admin/tenant/create-full', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
-                    body: JSON.stringify({
-                        company_name: document.getElementById('companyName').value,
-                        active_modules: ['general'],
-                        db_type: selectedDbType,
-                        connection_url: document.getElementById('connectionUrl').value,
-                        ssl_required: true,
-                    })
+                    body: JSON.stringify(body)
                 });
-
                 if (!createRes.ok) throw new Error((await createRes.json()).detail || 'Failed to create tenant');
                 const { tenant_id } = await createRes.json();
 
@@ -146,10 +474,11 @@
                 errBox.textContent = `❌ ${err.message}`;
                 errBox.style.display = 'block';
             } finally {
-                btn.textContent = 'Provision Tenant & Generate Link →';
+                btn.textContent = 'Provision Tenant & Generate Magic Link →';
                 btn.disabled = false;
             }
         });
     </script>
 </body>
+
 </html>

@@ -3,14 +3,18 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import asyncpg
 import jwt
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
-from .database import create_tenant_record, fetch_postgres_schema, save_tenant_credentials
+from .database import (
+    create_tenant_record,
+    fetch_google_sheet_data,
+    fetch_postgres_schema,
+    save_tenant_credentials,
+)
 
 load_dotenv()
 
@@ -19,20 +23,32 @@ ADMIN_SECRET_TOKEN = os.getenv("ADMIN_SECRET_TOKEN", "")
 router = APIRouter(prefix="/admin/tenant", tags=["admin"])
 
 
+# ─── Request Models ─────────────────────────────────────────────────────────────
+
 class ConnectTenantDBRequest(BaseModel):
     tenant_id: str
-    db_type: str = Field(min_length=1)  # e.g., postgresql or google_sheets
-    connection_url: str = Field(min_length=1)
+    db_type: str = Field(min_length=1)
+    # For PostgreSQL (Supabase / AWS)
+    connection_url: str | None = None
     ssl_required: bool = True
+    # For Google Sheets
+    google_sheet_id: str | None = None
+    google_credentials_json: str | None = None
 
 
 class CreateFullTenantRequest(BaseModel):
     company_name: str
     active_modules: list[str]
     db_type: str = Field(min_length=1)
-    connection_url: str = Field(min_length=1)
+    # For PostgreSQL (Supabase / AWS)
+    connection_url: str | None = None
     ssl_required: bool = True
+    # For Google Sheets
+    google_sheet_id: str | None = None
+    google_credentials_json: str | None = None
 
+
+# ─── Auth ────────────────────────────────────────────────────────────────────────
 
 async def verify_admin_token(x_admin_token: str | None = Header(default=None, alias="x-admin-token")) -> None:
     if not ADMIN_SECRET_TOKEN:
@@ -40,35 +56,75 @@ async def verify_admin_token(x_admin_token: str | None = Header(default=None, al
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="ADMIN_SECRET_TOKEN is not configured.",
         )
-
     if x_admin_token != ADMIN_SECRET_TOKEN:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token.")
 
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────────
+
+def _extract_schema_and_creds(db_type: str, payload: ConnectTenantDBRequest | CreateFullTenantRequest) -> tuple[str, str | None, str | None]:
+    """Returns (connection_url, schema_blueprint, google_credentials_json)."""
+    if db_type.lower() == "postgresql":
+        if not payload.connection_url:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="connection_url is required for PostgreSQL.")
+        try:
+            blueprint = fetch_postgres_schema.__doc__  # placeholder until await below
+            return payload.connection_url, None, None  # blueprint filled async by caller
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database error: {e}")
+
+    if db_type.lower() == "google_sheets":
+        if not payload.google_sheet_id or not payload.google_credentials_json:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="google_sheet_id and google_credentials_json are required for Google Sheets."
+            )
+        return f"google_sheets://{payload.google_sheet_id}", None, payload.google_credentials_json
+
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported db_type: '{db_type}'. Use 'postgresql' or 'google_sheets'.")
+
+
+# ─── Routes ──────────────────────────────────────────────────────────────────────
 
 @router.post("/connect-db")
 async def connect_tenant_db(
     payload: ConnectTenantDBRequest,
     _: None = Depends(verify_admin_token),
 ) -> dict[str, Any]:
-    schema_blueprint = None
+    schema_blueprint: str | None = None
+    google_credentials: str | None = None
+    connection_url = ""
 
     if payload.db_type.lower() == "postgresql":
+        if not payload.connection_url:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="connection_url is required for PostgreSQL.")
         try:
             schema_blueprint = await fetch_postgres_schema(payload.connection_url)
         except Exception as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database execution failed: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database connection failed: {e}")
+        connection_url = payload.connection_url
+
     elif payload.db_type.lower() == "google_sheets":
-        schema_blueprint = "Google Sheets Auto-Discovery Placeholder"
+        if not payload.google_sheet_id or not payload.google_credentials_json:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="google_sheet_id and google_credentials_json are required.")
+        try:
+            blueprint, _ = fetch_google_sheet_data(payload.google_sheet_id, payload.google_credentials_json)
+            schema_blueprint = blueprint
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Google Sheets connection failed: {e}")
+        connection_url = f"google_sheets://{payload.google_sheet_id}"
+        google_credentials = payload.google_credentials_json
     else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported DB type.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported db_type.")
 
     try:
         await save_tenant_credentials(
             tenant_id=payload.tenant_id,
             db_type=payload.db_type,
-            connection_url=payload.connection_url,
+            connection_url=connection_url,
             schema_blueprint=schema_blueprint,
-            ssl_required=payload.ssl_required,
+            ssl_required=payload.ssl_required if payload.db_type.lower() == "postgresql" else False,
+            google_credentials=google_credentials,
         )
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found.")
@@ -81,26 +137,41 @@ async def create_full_tenant(
     payload: CreateFullTenantRequest,
     _: None = Depends(verify_admin_token),
 ) -> dict[str, Any]:
-    schema_blueprint = None
+    schema_blueprint: str | None = None
+    google_credentials: str | None = None
+    connection_url = ""
 
     if payload.db_type.lower() == "postgresql":
+        if not payload.connection_url:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="connection_url is required for PostgreSQL.")
         try:
             schema_blueprint = await fetch_postgres_schema(payload.connection_url)
         except Exception as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database connection failed: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database connection failed: {e}")
+        connection_url = payload.connection_url
+
     elif payload.db_type.lower() == "google_sheets":
-        schema_blueprint = "Google Sheets Pending Fetch"
+        if not payload.google_sheet_id or not payload.google_credentials_json:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="google_sheet_id and google_credentials_json are required.")
+        try:
+            blueprint, _ = fetch_google_sheet_data(payload.google_sheet_id, payload.google_credentials_json)
+            schema_blueprint = blueprint
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Google Sheets connection failed: {e}")
+        connection_url = f"google_sheets://{payload.google_sheet_id}"
+        google_credentials = payload.google_credentials_json
     else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported DB type.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported db_type.")
 
     tenant_id = await create_tenant_record(payload.company_name, payload.active_modules)
 
     await save_tenant_credentials(
         tenant_id=tenant_id,
         db_type=payload.db_type,
-        connection_url=payload.connection_url,
+        connection_url=connection_url,
         schema_blueprint=schema_blueprint,
-        ssl_required=payload.ssl_required,
+        ssl_required=payload.ssl_required if payload.db_type.lower() == "postgresql" else False,
+        google_credentials=google_credentials,
     )
 
     return {"status": "created", "tenant_id": str(tenant_id)}
@@ -116,7 +187,6 @@ async def generate_magic_link(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="ADMIN_SECRET_TOKEN is not configured for JWT signing.",
         )
-
     payload_data = {
         "tenant_id": tenant_id,
         "exp": datetime.now(timezone.utc) + timedelta(hours=72)
