@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import uuid
@@ -19,6 +20,8 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 FERNET_SECRET_KEY = os.getenv("FERNET_SECRET_KEY", "")
+TENANT_DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("TENANT_DB_CONNECT_TIMEOUT_SECONDS", "20"))
+TENANT_DB_CONNECT_RETRIES = int(os.getenv("TENANT_DB_CONNECT_RETRIES", "1"))
 
 
 class TenantDBConnectionError(Exception):
@@ -222,7 +225,12 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 	try:
 		from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-		parsed = urlparse(connection_string)
+		normalized_url = _convert_to_asyncpg_url(connection_string)
+		parsed = urlparse(normalized_url)
+		if not parsed.hostname:
+			raise TenantDBConnectionError("Tenant DB hostname is missing in connection URL.")
+		if not parsed.path or parsed.path == "/":
+			raise TenantDBConnectionError("Tenant DB name is missing in connection URL.")
 		query_params = parse_qs(parsed.query)
 
 		# asyncpg doesn't understand sslmode=; strip it and pass ssl= explicitly
@@ -231,22 +239,35 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 		clean_url = urlunparse(parsed._replace(query=clean_query))
 
 		# Determine SSL setting
-		if ssl_mode and ssl_mode in ("require", "prefer", "disable"):
+		if ssl_mode and ssl_mode in ("require", "prefer", "disable", "verify-ca", "verify-full"):
 			ssl_arg = ssl_mode
 		elif credential.ssl_required:
 			ssl_arg = "require"
 		else:
 			ssl_arg = "prefer"
 
-		connection = await asyncpg.connect(
-			clean_url,
-			ssl=ssl_arg,
-			timeout=10,
-		)
-		await _touch_last_connected(credential.id)
-		return connection
-	except Exception:
-		raise TenantDBConnectionError("Could not connect to tenant database. Please verify connection settings.")
+		last_error: Exception | None = None
+		attempts = max(1, TENANT_DB_CONNECT_RETRIES + 1)
+		for attempt in range(1, attempts + 1):
+			try:
+				connection = await asyncpg.connect(
+					clean_url,
+					ssl=ssl_arg,
+					timeout=TENANT_DB_CONNECT_TIMEOUT_SECONDS,
+				)
+				await _touch_last_connected(credential.id)
+				return connection
+			except Exception as exc:
+				last_error = exc
+				if attempt < attempts:
+					await asyncio.sleep(0.3)
+
+		detail = _describe_connection_exception(last_error) if last_error else "unknown error"
+		raise TenantDBConnectionError(f"Could not connect to tenant database: {detail}")
+	except TenantDBConnectionError:
+		raise
+	except Exception as exc:
+		raise TenantDBConnectionError(f"Could not connect to tenant database: {_describe_connection_exception(exc)}")
 
 
 async def execute_tenant_query(tenant_id: uuid.UUID | str, sql: str, *params: Any) -> list[dict[str, Any]]:
