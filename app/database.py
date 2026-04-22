@@ -225,9 +225,15 @@ async def execute_tenant_query(tenant_id: uuid.UUID | str, sql: str, *params: An
 	try:
 		rows = await connection.fetch(sql, *params)
 		return [dict(row) for row in rows]
-	except asyncpg.PostgresError:
-		raise QueryExecutionError("Failed to execute query against tenant database.")
-	except Exception:
+	except asyncpg.PostgresError as e:
+		import logging
+		logger = logging.getLogger(__name__)
+		logger.error(f"PostgresError executing tenant query. SQL: {sql} | Error: {e}")
+		raise QueryExecutionError(f"Failed to execute query: {e}")
+	except Exception as e:
+		import logging
+		logger = logging.getLogger(__name__)
+		logger.error(f"Unexpected error executing tenant query: {e}")
 		raise QueryExecutionError("An unexpected error occurred while running tenant query.")
 	finally:
 		await connection.close()

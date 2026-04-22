@@ -154,7 +154,8 @@ async def handle_message(msg: BotMessage) -> None:
             try:
                 query_rows = await execute_tenant_query(tenant.id, sql_query)
             except QueryExecutionError as e:
-                await send_reply(msg, f"I encountered an error looking up your request: {e}")
+                # Expose the exact error during development for debugging
+                await send_reply(msg, f"Database Error:\nQuery: {sql_query}\nDetails: {e}")
                 return
                 
             # 3. Ask LLM to format the output
