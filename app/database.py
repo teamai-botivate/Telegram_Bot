@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -71,6 +72,17 @@ def _convert_to_asyncpg_url(database_url: str) -> str:
 		return parsed.set(drivername="postgresql").render_as_string(hide_password=False)
 
 	raise ValueError("DATABASE_URL must use a PostgreSQL scheme.")
+
+
+def _describe_connection_exception(exc: Exception) -> str:
+	message = str(exc).strip()
+	if isinstance(exc, TimeoutError):
+		return "Connection timed out. Verify host/port, SSL settings, and that your DB allows inbound traffic from Render."
+	if isinstance(exc, socket.gaierror):
+		return "Database hostname could not be resolved. Check the DB host in your connection URL."
+	if message:
+		return message
+	return f"{type(exc).__name__} (no error details provided)"
 
 META_SQLALCHEMY_DATABASE_URL = _convert_to_sqlalchemy_asyncpg_url(DATABASE_URL) if DATABASE_URL else ""
 
@@ -288,33 +300,37 @@ async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_
 
 
 async def fetch_postgres_schema(connection_string: str) -> str:
+	connection: asyncpg.Connection | None = None
 	try:
-		# asyncpg doesn't understand sslmode= in URL; strip it and pass ssl= explicitly
-		from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+		# asyncpg doesn't understand sslmode= in URL; strip it and pass ssl= explicitly.
+		from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-		parsed = urlparse(connection_string)
+		normalized_url = _convert_to_asyncpg_url(connection_string)
+		parsed = urlparse(normalized_url)
+		if not parsed.hostname:
+			raise ValueError("Connection URL is missing a hostname.")
+		if not parsed.path or parsed.path == "/":
+			raise ValueError("Connection URL is missing a database name (for example: /postgres).")
 		query_params = parse_qs(parsed.query)
 
-		# Extract SSL preference
 		ssl_mode = query_params.pop("sslmode", query_params.pop("ssl", ["require"]))[0]
 		clean_query = urlencode({k: v[0] for k, v in query_params.items()})
 		clean_url = urlunparse(parsed._replace(query=clean_query))
 
-		ssl_arg = ssl_mode if ssl_mode in ("require", "prefer", "disable") else "require"
+		allowed_ssl_modes = {"require", "prefer", "disable", "verify-ca", "verify-full"}
+		ssl_arg = ssl_mode if ssl_mode in allowed_ssl_modes else "require"
 
-		connection = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=10)
-		
-		# 1. Fetch ENUM types and their allowed values
+		connection = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=15)
+
 		enum_sql = """
 		SELECT t.typname AS enum_name, array_agg(e.enumlabel::text) AS enum_values
-		FROM pg_type t 
-		JOIN pg_enum e ON t.oid = e.enumtypid  
+		FROM pg_type t
+		JOIN pg_enum e ON t.oid = e.enumtypid
 		GROUP BY t.typname;
 		"""
 		enum_rows = await connection.fetch(enum_sql)
-		enums = {row['enum_name']: row['enum_values'] for row in enum_rows}
+		enums = {row["enum_name"]: row["enum_values"] for row in enum_rows}
 
-		# 2. Fetch schema columns
 		sql = """
 		SELECT table_schema, table_name, column_name, data_type, udt_name
 		FROM information_schema.columns
@@ -322,33 +338,31 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		ORDER BY table_schema, table_name, ordinal_position;
 		"""
 		rows = await connection.fetch(sql)
-		await connection.close()
-		
-		tables = {}
+
+		tables: dict[str, list[str]] = {}
 		for row in rows:
-			s = row['table_schema']
-			t = row['table_name']
-			c = row['column_name']
-			d = row['data_type']
-			u = row['udt_name']
-			
-			# If it's an enum, show the allowed values
-			if d == 'USER-DEFINED' and u in enums:
-				d = f"enum({', '.join(enums[u])})"
-			
-			full_name = f"{s}.{t}" if s != 'public' else t
-			
-			if full_name not in tables:
-				tables[full_name] = []
-			tables[full_name].append(f"{c} ({d})")
-			
+			schema = row["table_schema"]
+			table = row["table_name"]
+			column = row["column_name"]
+			data_type = row["data_type"]
+			udt_name = row["udt_name"]
+
+			if data_type == "USER-DEFINED" and udt_name in enums:
+				data_type = f"enum({', '.join(enums[udt_name])})"
+
+			full_name = f"{schema}.{table}" if schema != "public" else table
+			tables.setdefault(full_name, []).append(f"{column} ({data_type})")
+
 		blueprint = "Database Blueprint (PostgreSQL):\n"
-		for t, cols in tables.items():
-			blueprint += f"Table `{t}` | Columns: {', '.join(cols)}\n"
-			
+		for table_name, cols in tables.items():
+			blueprint += f"Table `{table_name}` | Columns: {', '.join(cols)}\n"
+
 		return blueprint.strip()
 	except Exception as e:
-		raise ValueError(f"Failed to extract database blueprint: {e}")
+		raise ValueError(f"Failed to extract database blueprint: {_describe_connection_exception(e)}")
+	finally:
+		if connection is not None:
+			await connection.close()
 
 
 def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:
