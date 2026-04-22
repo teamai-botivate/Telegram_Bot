@@ -18,11 +18,7 @@ logger = logging.getLogger(__name__)
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
-
-# Dual-model architecture: Codestral for SQL, Mistral Small for chat
-MISTRAL_SQL_MODEL = os.getenv("MISTRAL_SQL_MODEL", "codestral-latest")
-MISTRAL_CHAT_MODEL = os.getenv("MISTRAL_CHAT_MODEL", "mistral-small-latest")
-
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "codestral-latest")
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 
 
@@ -42,12 +38,12 @@ def _extract_assistant_text(response_data: dict[str, Any]) -> str:
     return ""
 
 
-async def _call_mistral(messages: list[dict[str, str]], max_tokens: int, *, model: str | None = None) -> str:
+async def _call_mistral(messages: list[dict[str, str]], max_tokens: int) -> str:
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY is not configured in .env.")
 
     payload = {
-        "model": model or MISTRAL_CHAT_MODEL,
+        "model": MISTRAL_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
     }
@@ -75,15 +71,13 @@ async def generate_sql_query(company_name: str, schema_blueprint: str, question:
         "2. Query must be a SELECT statement to answer the user's question.\n"
         "3. Use exactly the table and column names provided in the blueprint.\n"
         "4. If a table name includes a schema prefix (e.g., 'schema.table'), you MUST use the full name.\n"
-        "5. Limit to the top 10 rows if applicable.\n"
-        "6. For enum columns, use ONLY the exact allowed values shown in the schema (e.g., enum(val1, val2)).\n"
-        "7. Use ILIKE for text matching to handle case differences."
+        "5. Limit to the top 10 rows if applicable."
     )
     
     raw_output = await _call_mistral([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question}
-    ], max_tokens=300, model=MISTRAL_SQL_MODEL)
+    ], max_tokens=300)
     
     # Strip markdown block quotes if the LLM adds them
     cleaned = raw_output.strip()
