@@ -208,9 +208,27 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 		raise TenantDBConnectionError("Tenant database credentials are invalid or could not be decrypted.")
 
 	try:
+		from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+		parsed = urlparse(connection_string)
+		query_params = parse_qs(parsed.query)
+
+		# asyncpg doesn't understand sslmode=; strip it and pass ssl= explicitly
+		ssl_mode = query_params.pop("sslmode", query_params.pop("ssl", [None]))[0]
+		clean_query = urlencode({k: v[0] for k, v in query_params.items()})
+		clean_url = urlunparse(parsed._replace(query=clean_query))
+
+		# Determine SSL setting
+		if ssl_mode and ssl_mode in ("require", "prefer", "disable"):
+			ssl_arg = ssl_mode
+		elif credential.ssl_required:
+			ssl_arg = "require"
+		else:
+			ssl_arg = "prefer"
+
 		connection = await asyncpg.connect(
-			connection_string,
-			ssl="require" if credential.ssl_required else "prefer",
+			clean_url,
+			ssl=ssl_arg,
 			timeout=10,
 		)
 		await _touch_last_connected(credential.id)
