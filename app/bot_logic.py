@@ -69,7 +69,9 @@ async def generate_sql_query(company_name: str, schema_blueprint: str, question:
         "Rules:\n"
         "1. Return ONLY the raw SQL query. No markdown, no explanations.\n"
         "2. Query must be a SELECT statement to answer the user's question.\n"
-        "3. Limit to the top 10 rows if applicable."
+        "3. Use exactly the table and column names provided in the blueprint.\n"
+        "4. If a table name includes a schema prefix (e.g., 'schema.table'), you MUST use the full name.\n"
+        "5. Limit to the top 10 rows if applicable."
     )
     
     raw_output = await _call_mistral([

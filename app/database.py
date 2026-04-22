@@ -265,24 +265,41 @@ async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_
 
 async def fetch_postgres_schema(connection_string: str) -> str:
 	try:
-		connection = await asyncpg.connect(connection_string, timeout=10)
+		# asyncpg doesn't understand sslmode= in URL; strip it and pass ssl= explicitly
+		from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+		parsed = urlparse(connection_string)
+		query_params = parse_qs(parsed.query)
+
+		# Extract SSL preference
+		ssl_mode = query_params.pop("sslmode", query_params.pop("ssl", ["require"]))[0]
+		clean_query = urlencode({k: v[0] for k, v in query_params.items()})
+		clean_url = urlunparse(parsed._replace(query=clean_query))
+
+		ssl_arg = ssl_mode if ssl_mode in ("require", "prefer", "disable") else "require"
+
+		connection = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=10)
 		sql = """
-		SELECT table_name, column_name, data_type
+		SELECT table_schema, table_name, column_name, data_type
 		FROM information_schema.columns
-		WHERE table_schema = 'public'
-		ORDER BY table_name, ordinal_position;
+		WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
+		ORDER BY table_schema, table_name, ordinal_position;
 		"""
 		rows = await connection.fetch(sql)
 		await connection.close()
 		
 		tables = {}
 		for row in rows:
+			s = row['table_schema']
 			t = row['table_name']
 			c = row['column_name']
 			d = row['data_type']
-			if t not in tables:
-				tables[t] = []
-			tables[t].append(f"{c} ({d})")
+			
+			full_name = f"{s}.{t}" if s != 'public' else t
+			
+			if full_name not in tables:
+				tables[full_name] = []
+			tables[full_name].append(f"{c} ({d})")
 			
 		blueprint = "Database Blueprint (PostgreSQL):\n"
 		for t, cols in tables.items():
