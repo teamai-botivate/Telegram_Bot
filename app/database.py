@@ -285,8 +285,20 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		ssl_arg = ssl_mode if ssl_mode in ("require", "prefer", "disable") else "require"
 
 		connection = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=10)
+		
+		# 1. Fetch ENUM types and their allowed values
+		enum_sql = """
+		SELECT t.typname AS enum_name, array_agg(e.enumlabel) AS enum_values
+		FROM pg_type t 
+		JOIN pg_enum e ON t.oid = e.enumtypid  
+		GROUP BY t.typname;
+		"""
+		enum_rows = await connection.fetch(enum_sql)
+		enums = {row['enum_name']: row['enum_values'] for row in enum_rows}
+
+		# 2. Fetch schema columns
 		sql = """
-		SELECT table_schema, table_name, column_name, data_type
+		SELECT table_schema, table_name, column_name, data_type, udt_name
 		FROM information_schema.columns
 		WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
 		ORDER BY table_schema, table_name, ordinal_position;
@@ -300,6 +312,11 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 			t = row['table_name']
 			c = row['column_name']
 			d = row['data_type']
+			u = row['udt_name']
+			
+			# If it's an enum, show the allowed values
+			if d == 'USER-DEFINED' and u in enums:
+				d = f"enum({', '.join(enums[u])})"
 			
 			full_name = f"{s}.{t}" if s != 'public' else t
 			
