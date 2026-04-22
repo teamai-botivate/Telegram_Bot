@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
 
 from .database import QueryExecutionError, execute_tenant_query, get_tenant_by_chat_id, get_tenant_credentials
-from .platforms.base import BotMessage, send_reply
+from .platforms.base import BotMessage, Platform, send_reply
 
 load_dotenv()
 
@@ -22,6 +23,12 @@ SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "codestral-latest")
 RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-small-latest")
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
+SQL_DEFAULT_ROW_LIMIT = int(os.getenv("SQL_DEFAULT_ROW_LIMIT", "50"))
+SQL_FULL_ROW_LIMIT = int(os.getenv("SQL_FULL_ROW_LIMIT", "500"))
+
+
+class NeedsClarificationError(Exception):
+    """Raised when user input is ambiguous and needs follow-up."""
 
 
 def _extract_assistant_text(response_data: dict[str, Any]) -> str:
@@ -63,32 +70,110 @@ async def _call_mistral(messages: list[dict[str, str]], max_tokens: int, model: 
     return assistant_text or ""
 
 
+def _strip_code_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json|sql)?", "", cleaned, flags=re.IGNORECASE).strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+    return cleaned
+
+
+def _extract_json_dict(raw: str) -> dict[str, Any] | None:
+    cleaned = _strip_code_fences(raw)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_full_result_request(question: str) -> bool:
+    return bool(re.search(r"\b(all|whole|full|complete|entire)\b", question, flags=re.IGNORECASE))
+
+
 async def generate_sql_query(company_name: str, schema_blueprint: str, question: str) -> str:
+    row_limit = SQL_FULL_ROW_LIMIT if _is_full_result_request(question) else SQL_DEFAULT_ROW_LIMIT
+    today_utc = datetime.now(timezone.utc).date().isoformat()
     system_prompt = (
         f"You are the Text-to-SQL backend for {company_name}.\n"
-        f"You must translate the user's question into a valid PostgreSQL SELECT query.\n\n"
+        "You must translate the user's question into a valid PostgreSQL read-only query.\n"
+        f"Today's UTC date is {today_utc}.\n\n"
         f"Database Schema:\n{schema_blueprint}\n\n"
         "Rules:\n"
-        "1. Return ONLY the raw SQL query. No markdown, no explanations.\n"
-        "2. Query must be a SELECT statement to answer the user's question.\n"
-        "3. Use exactly the table and column names provided in the blueprint.\n"
-        "4. If a table name includes a schema prefix (e.g., 'schema.table'), you MUST use the full name.\n"
-        "5. Limit to the top 10 rows if applicable."
+        "1. Query must be SELECT/WITH only. Never generate INSERT/UPDATE/DELETE/DDL.\n"
+        "2. Use exactly the table and column names provided in the blueprint.\n"
+        "3. If a table name includes schema prefix (e.g., 'schema.table'), use the full name.\n"
+        f"4. Add deterministic ORDER BY when returning lists.\n"
+        f"5. By default use LIMIT {row_limit} unless the SQL already has a stricter limit.\n"
+        f"6. If user asks for full/all/whole data, do not leave it unbounded: cap with LIMIT {SQL_FULL_ROW_LIMIT}.\n"
+        "7. If the request is ambiguous or missing key filters, ask a clarification question.\n\n"
+        "Return STRICT JSON only with keys:\n"
+        "{\"sql\": string|null, \"clarification_question\": string|null}"
     )
     
     raw_output = await _call_mistral([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question}
-    ], max_tokens=300, model=SQL_GENERATION_MODEL)
-    
-    # Strip markdown block quotes if the LLM adds them
-    cleaned = raw_output.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:sql)?", "", cleaned, flags=re.IGNORECASE).strip()
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].strip()
-            
+    ], max_tokens=500, model=SQL_GENERATION_MODEL)
+
+    payload = _extract_json_dict(raw_output)
+    if payload is not None:
+        clarification_question = payload.get("clarification_question")
+        if isinstance(clarification_question, str) and clarification_question.strip():
+            raise NeedsClarificationError(clarification_question.strip())
+        sql_value = payload.get("sql")
+        cleaned = sql_value.strip() if isinstance(sql_value, str) else ""
+    else:
+        cleaned = _strip_code_fences(raw_output)
+
     return cleaned
+
+
+async def repair_sql_query(
+    company_name: str,
+    schema_blueprint: str,
+    question: str,
+    failed_sql: str,
+    db_error: str,
+) -> str:
+    prompt = (
+        f"You are fixing a failed SQL query for {company_name}.\n"
+        f"Database schema:\n{schema_blueprint}\n\n"
+        f"User question:\n{question}\n\n"
+        f"Failed SQL:\n{failed_sql}\n\n"
+        f"Database error:\n{db_error}\n\n"
+        "Return STRICT JSON only with keys:\n"
+        "{\"sql\": string, \"clarification_question\": string|null}\n"
+        "Rules:\n"
+        "- SELECT/WITH only.\n"
+        "- Keep semantics of user question.\n"
+        "- Fix table/column names and joins based on schema.\n"
+        f"- Include LIMIT <= {SQL_FULL_ROW_LIMIT}."
+    )
+    raw = await _call_mistral(
+        [{"role": "user", "content": prompt}],
+        max_tokens=500,
+        model=SQL_GENERATION_MODEL,
+    )
+    payload = _extract_json_dict(raw)
+    if payload is not None:
+        clarification_question = payload.get("clarification_question")
+        if isinstance(clarification_question, str) and clarification_question.strip():
+            raise NeedsClarificationError(clarification_question.strip())
+        sql_value = payload.get("sql")
+        return sql_value.strip() if isinstance(sql_value, str) else ""
+    return _strip_code_fences(raw)
 
 
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
@@ -99,7 +184,10 @@ async def format_sql_response(company_name: str, question: str, sql_results: lis
         f"The user asked: '{question}'.\n"
         f"The database returned: {rows_json}\n\n"
         "Your task:\n"
-        "- Read the database rows and directly answer the user's question.\n"
+        "- Use ONLY these rows as source of truth.\n"
+        "- Do NOT invent dates, names, counts, or fields not present in rows.\n"
+        "- If rows are list-like, present key rows in concise bullets.\n"
+        "- If data is insufficient, say exactly what is missing.\n"
         "- Be friendly, natural, and concise.\n"
         "- Reply in exactly the same language the user wrote in."
     )
@@ -107,7 +195,7 @@ async def format_sql_response(company_name: str, question: str, sql_results: lis
     reply = await _call_mistral([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Please answer my question using the data provided."}
-    ], max_tokens=400, model=RESPONSE_FORMAT_MODEL)
+    ], max_tokens=600, model=RESPONSE_FORMAT_MODEL)
     return reply
 
 
@@ -147,10 +235,25 @@ def _validate_generated_sql(sql: str) -> str:
     return cleaned
 
 
+def _format_rows_fallback(rows: list[dict[str, Any]], max_rows: int = 20) -> str:
+    if not rows:
+        return "I couldn't find any data matching your request."
+
+    preview = rows[:max_rows]
+    lines = [f"I found {len(rows)} record(s)."]
+    for index, row in enumerate(preview, start=1):
+        parts = [f"{key}: {value}" for key, value in row.items()]
+        lines.append(f"{index}. " + " | ".join(parts))
+    if len(rows) > max_rows:
+        lines.append(f"...and {len(rows) - max_rows} more record(s).")
+    return "\n".join(lines)
+
+
 async def handle_message(msg: BotMessage) -> None:
     try:
         # Magic Link Onboarding Hooks
         text_upper = msg.text.strip().upper()
+        text_normalized = msg.text.strip().lower()
         token = None
         if msg.platform == "telegram" and text_upper.startswith("/START ") and len(msg.text.split()) > 1:
             token = msg.text.strip().split(" ", 1)[1]
@@ -173,6 +276,12 @@ async def handle_message(msg: BotMessage) -> None:
                 await send_reply(msg, "Sorry, your onboarding link is invalid or expired. Please request a new link.")
                 return
 
+        if (msg.platform == Platform.TELEGRAM and text_normalized == "/start") or (
+            msg.platform == Platform.WHATSAPP and text_normalized == "start"
+        ):
+            await send_reply(msg, "Hi! I'm ready. Ask me a business question and I'll fetch it from your data.")
+            return
+
         tenant = await get_tenant_by_chat_id(msg.chat_id)
         if tenant is None:
             await send_reply(msg, ACCOUNT_NOT_FOUND_MESSAGE)
@@ -188,7 +297,13 @@ async def handle_message(msg: BotMessage) -> None:
             blueprint = credentials.schema_blueprint or "No schema available."
             try:
                 sql_query = await generate_sql_query(tenant.company_name, blueprint, msg.text)
+                if not sql_query:
+                    await send_reply(msg, "Could you clarify your request with more detail?")
+                    return
                 sql_query = _validate_generated_sql(sql_query)
+            except NeedsClarificationError as e:
+                await send_reply(msg, str(e))
+                return
             except Exception as e:
                 logger.error(f"LLM SQL generation failed: {e}")
                 await send_reply(msg, GENERIC_FAILURE_MESSAGE)
@@ -200,9 +315,28 @@ async def handle_message(msg: BotMessage) -> None:
             try:
                 query_rows = await execute_tenant_query(tenant.id, sql_query)
             except QueryExecutionError as e:
-                logger.error("Tenant query failed: %s", e)
-                await send_reply(msg, GENERIC_FAILURE_MESSAGE)
-                return
+                logger.error("Tenant query failed (first attempt): %s", e)
+                try:
+                    repaired_sql = await repair_sql_query(
+                        tenant.company_name,
+                        blueprint,
+                        msg.text,
+                        failed_sql=sql_query,
+                        db_error=str(e),
+                    )
+                    if not repaired_sql:
+                        await send_reply(msg, GENERIC_FAILURE_MESSAGE)
+                        return
+                    repaired_sql = _validate_generated_sql(repaired_sql)
+                    logger.info("Repaired SQL for tenant %s: %s", tenant.id, repaired_sql)
+                    query_rows = await execute_tenant_query(tenant.id, repaired_sql)
+                except NeedsClarificationError as repair_clarification:
+                    await send_reply(msg, str(repair_clarification))
+                    return
+                except Exception as repair_error:
+                    logger.error("Tenant query failed after SQL repair: %s", repair_error)
+                    await send_reply(msg, GENERIC_FAILURE_MESSAGE)
+                    return
                 
             # 3. Ask LLM to format the output
             if not query_rows:
@@ -211,9 +345,11 @@ async def handle_message(msg: BotMessage) -> None:
             
             try:
                 reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
+                if not reply.strip():
+                    raise ValueError("Empty formatted reply.")
             except Exception as e:
                 logger.error(f"LLM response formatting failed: {e}")
-                await send_reply(msg, GENERIC_FAILURE_MESSAGE)
+                await send_reply(msg, _format_rows_fallback(query_rows))
                 return
             await send_reply(msg, reply)
             

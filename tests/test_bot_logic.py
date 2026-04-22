@@ -78,6 +78,51 @@ async def test_handle_message_tenant_query_error(monkeypatch) -> None:
     send_reply_mock.assert_awaited_once_with(message, bot_logic.GENERIC_FAILURE_MESSAGE)
 
 
+@pytest.mark.asyncio
+async def test_handle_message_retries_query_with_repaired_sql(monkeypatch) -> None:
+    tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
+    credentials = SimpleNamespace(
+        db_type="postgresql",
+        connection_url="encrypted_url",
+        schema_blueprint="Table `calendar` | Columns: date (date), is_working (bool)",
+    )
+    send_reply_mock = AsyncMock()
+
+    execute_mock = AsyncMock(
+        side_effect=[
+            QueryExecutionError("column work_date does not exist"),
+            [{"date": "2026-04-22", "is_working": True}],
+        ]
+    )
+    monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
+    monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT work_date FROM calendar"))
+    monkeypatch.setattr(bot_logic, "repair_sql_query", AsyncMock(return_value="SELECT date, is_working FROM calendar LIMIT 50"))
+    monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
+    monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="Here is your working calendar."))
+
+    message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="working calendar")
+    await bot_logic.handle_message(message)
+
+    assert execute_mock.await_count == 2
+    send_reply_mock.assert_awaited_once_with(message, "Here is your working calendar.")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_start_without_token_returns_help(monkeypatch) -> None:
+    send_reply_mock = AsyncMock()
+    monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
+
+    message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="/start")
+    await bot_logic.handle_message(message)
+
+    send_reply_mock.assert_awaited_once_with(
+        message,
+        "Hi! I'm ready. Ask me a business question and I'll fetch it from your data.",
+    )
+
+
 def test_validate_generated_sql_allows_select_and_with() -> None:
     assert bot_logic._validate_generated_sql("SELECT 1;") == "SELECT 1"
     assert bot_logic._validate_generated_sql("WITH t AS (SELECT 1) SELECT * FROM t") == "WITH t AS (SELECT 1) SELECT * FROM t"
@@ -119,6 +164,36 @@ async def test_format_sql_response_uses_response_format_model(monkeypatch) -> No
 
     assert reply == "Here is your answer."
     assert call_mock.await_args.kwargs["model"] == "mistral-small-latest"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_uses_fallback_rows_when_formatting_fails(monkeypatch) -> None:
+    tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
+    credentials = SimpleNamespace(
+        db_type="postgresql",
+        connection_url="encrypted_url",
+        schema_blueprint="Table `orders` | Columns: id (uuid), status (text)",
+    )
+    send_reply_mock = AsyncMock()
+
+    monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
+    monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id, status FROM orders LIMIT 10"))
+    monkeypatch.setattr(
+        bot_logic,
+        "execute_tenant_query",
+        AsyncMock(return_value=[{"id": "o-1", "status": "done"}]),
+    )
+    monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(side_effect=RuntimeError("formatter down")))
+
+    message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="order status")
+    await bot_logic.handle_message(message)
+
+    send_reply_mock.assert_awaited_once()
+    reply_text = send_reply_mock.call_args.args[1]
+    assert "record(s)" in reply_text
+    assert "status: done" in reply_text
 
 
 @pytest.mark.asyncio
