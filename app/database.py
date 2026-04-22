@@ -288,7 +288,7 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		
 		# 1. Fetch ENUM types and their allowed values
 		enum_sql = """
-		SELECT t.typname AS enum_name, array_agg(e.enumlabel) AS enum_values
+		SELECT t.typname AS enum_name, array_agg(e.enumlabel::text) AS enum_values
 		FROM pg_type t 
 		JOIN pg_enum e ON t.oid = e.enumtypid  
 		GROUP BY t.typname;
