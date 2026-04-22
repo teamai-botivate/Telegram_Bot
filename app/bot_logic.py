@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "codestral-latest")
+SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "codestral-latest")
+RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-small-latest")
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
+GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
 
 
 def _extract_assistant_text(response_data: dict[str, Any]) -> str:
@@ -38,12 +40,12 @@ def _extract_assistant_text(response_data: dict[str, Any]) -> str:
     return ""
 
 
-async def _call_mistral(messages: list[dict[str, str]], max_tokens: int) -> str:
+async def _call_mistral(messages: list[dict[str, str]], max_tokens: int, model: str) -> str:
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY is not configured in .env.")
 
     payload = {
-        "model": MISTRAL_MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
     }
@@ -77,7 +79,7 @@ async def generate_sql_query(company_name: str, schema_blueprint: str, question:
     raw_output = await _call_mistral([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question}
-    ], max_tokens=300)
+    ], max_tokens=300, model=SQL_GENERATION_MODEL)
     
     # Strip markdown block quotes if the LLM adds them
     cleaned = raw_output.strip()
@@ -105,8 +107,44 @@ async def format_sql_response(company_name: str, question: str, sql_results: lis
     reply = await _call_mistral([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Please answer my question using the data provided."}
-    ], max_tokens=400)
+    ], max_tokens=400, model=RESPONSE_FORMAT_MODEL)
     return reply
+
+
+def _validate_generated_sql(sql: str) -> str:
+    cleaned = sql.strip()
+    if not cleaned:
+        raise ValueError("Generated SQL is empty.")
+
+    # Permit a trailing semicolon only; block multi-statement queries.
+    if cleaned.endswith(";"):
+        cleaned = cleaned[:-1].strip()
+    if ";" in cleaned:
+        raise ValueError("Generated SQL contains multiple statements.")
+
+    lowered = cleaned.lower()
+    if not (lowered.startswith("select ") or lowered.startswith("with ")):
+        raise ValueError("Generated SQL is not read-only.")
+
+    blocked_patterns = (
+        r"\binsert\b",
+        r"\bupdate\b",
+        r"\bdelete\b",
+        r"\bdrop\b",
+        r"\balter\b",
+        r"\btruncate\b",
+        r"\bcreate\b",
+        r"\bgrant\b",
+        r"\brevoke\b",
+        r"\bcopy\b",
+        r"\bexecute\b",
+        r"\bcall\b",
+        r"\bdo\b",
+    )
+    if any(re.search(pattern, lowered) for pattern in blocked_patterns):
+        raise ValueError("Generated SQL includes disallowed operations.")
+
+    return cleaned
 
 
 async def handle_message(msg: BotMessage) -> None:
@@ -150,9 +188,10 @@ async def handle_message(msg: BotMessage) -> None:
             blueprint = credentials.schema_blueprint or "No schema available."
             try:
                 sql_query = await generate_sql_query(tenant.company_name, blueprint, msg.text)
+                sql_query = _validate_generated_sql(sql_query)
             except Exception as e:
                 logger.error(f"LLM SQL generation failed: {e}")
-                await send_reply(msg, f"LLM Error: Could not generate SQL query. Details: {e}")
+                await send_reply(msg, GENERIC_FAILURE_MESSAGE)
                 return
             
             logger.info(f"Generated SQL for tenant {tenant.id}: {sql_query}")
@@ -161,7 +200,8 @@ async def handle_message(msg: BotMessage) -> None:
             try:
                 query_rows = await execute_tenant_query(tenant.id, sql_query)
             except QueryExecutionError as e:
-                await send_reply(msg, f"Database Error:\nQuery: {sql_query}\nDetails: {e}")
+                logger.error("Tenant query failed: %s", e)
+                await send_reply(msg, GENERIC_FAILURE_MESSAGE)
                 return
                 
             # 3. Ask LLM to format the output
@@ -173,7 +213,7 @@ async def handle_message(msg: BotMessage) -> None:
                 reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
             except Exception as e:
                 logger.error(f"LLM response formatting failed: {e}")
-                await send_reply(msg, f"I found the data but couldn't format a response. Raw results: {query_rows[:3]}")
+                await send_reply(msg, GENERIC_FAILURE_MESSAGE)
                 return
             await send_reply(msg, reply)
             
@@ -213,14 +253,14 @@ async def handle_message(msg: BotMessage) -> None:
             reply = await _call_mistral([
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": msg.text}
-            ], max_tokens=500)
+            ], max_tokens=500, model=RESPONSE_FORMAT_MODEL)
             await send_reply(msg, reply or "I couldn't generate a response.")
 
             
     except Exception as e:
         logger.exception("Failed to process customer message for chat_id %s", msg.chat_id)
         try:
-            await send_reply(msg, f"Unhandled Error: {type(e).__name__}: {e}")
+            await send_reply(msg, GENERIC_FAILURE_MESSAGE)
         except Exception:
             pass
 
