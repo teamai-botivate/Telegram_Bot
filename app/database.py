@@ -99,7 +99,7 @@ def _quote_ident(identifier: str) -> str:
 	return '"' + identifier.replace('"', '""') + '"'
 
 
-def _sanitize_select_sql(sql: str) -> str:
+def _sanitize_select_sql(sql: str, allow_select_star: bool = False) -> str:
 	cleaned = sql.strip().rstrip(";").strip()
 	if not cleaned:
 		raise SecurityError("Query is empty.")
@@ -115,6 +115,9 @@ def _sanitize_select_sql(sql: str) -> str:
 	for keyword in blocked_keywords:
 		if re.search(rf"\b{keyword}\b", lowered):
 			raise SecurityError(f"Disallowed keyword detected: {keyword.upper()}")
+
+	if not allow_select_star and re.search(r"\bselect\s+\*", lowered):
+		raise SecurityError("SELECT * is not allowed for this execution path.")
 
 	return cleaned
 
@@ -301,11 +304,16 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 		raise TenantDBConnectionError(f"Could not connect to tenant database: {_describe_connection_exception(exc)}")
 
 
-async def execute_tenant_query(tenant_id: uuid.UUID | str, sql: str, *params: Any) -> list[dict[str, Any]]:
+async def execute_tenant_query(
+	tenant_id: uuid.UUID | str,
+	sql: str,
+	*params: Any,
+	allow_select_star: bool = False,
+) -> list[dict[str, Any]]:
 	connection = await decrypt_and_connect(tenant_id)
 
 	try:
-		safe_sql = _sanitize_select_sql(sql)
+		safe_sql = _sanitize_select_sql(sql, allow_select_star=allow_select_star)
 		logger.info(
 			"Tenant query attempt tenant_id=%s timestamp=%s sql=%s",
 			tenant_id,
@@ -462,7 +470,26 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 			if src_full in tables:
 				tables[src_full]["fks"].append(f"FK: {src_full}.{src_col} -> {dst_full}.{dst_col}")
 
+		relationship_lines: list[str] = []
+		for fk in fk_rows:
+			src_schema = fk["table_schema"]
+			src_table = fk["table_name"]
+			src_col = fk["column_name"]
+			dst_schema = fk["foreign_table_schema"]
+			dst_table = fk["foreign_table_name"]
+			dst_col = fk["foreign_column_name"]
+			src_full = f"{src_schema}.{src_table}" if src_schema != "public" else src_table
+			dst_full = f"{dst_schema}.{dst_table}" if dst_schema != "public" else dst_table
+			relationship_lines.append(f"{src_full}.{src_col} -> {dst_full}.{dst_col}")
+
 		blueprint = "Database Blueprint (PostgreSQL):\n"
+		blueprint += "RELATIONSHIPS (use these for JOINs):\n"
+		if relationship_lines:
+			for rel in relationship_lines:
+				blueprint += rel + "\n"
+		else:
+			blueprint += "(none)\n"
+		blueprint += "\nTABLES:\n"
 		for table_name, info in tables.items():
 			schema = info["schema"]
 			table = info["table"]
@@ -479,9 +506,6 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 
 			blueprint += f"Table `{table_name}` | Rows: ~{row_count_str}\n"
 			blueprint += f"Columns: {', '.join(info['columns'])}\n"
-
-			for fk_line in info["fks"]:
-				blueprint += fk_line + "\n"
 
 			for text_col in info["text_columns"]:
 				try:
@@ -534,6 +558,21 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		await session.commit()
 
 	return blueprint
+
+
+async def update_tenant_query_hints(tenant_id: uuid.UUID | str, hints: str) -> None:
+	if session_factory is None:
+		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
+
+	tenant_uuid = uuid.UUID(str(tenant_id))
+	async with session_factory() as session:
+		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
+		result = await session.execute(statement)
+		credential = result.scalar_one_or_none()
+		if credential is None:
+			raise ValueError("Tenant credentials not found.")
+		credential.tenant_query_hints = hints
+		await session.commit()
 
 
 def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:

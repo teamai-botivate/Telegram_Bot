@@ -175,3 +175,23 @@ async def test_refresh_schema_success(monkeypatch) -> None:
     assert body["status"] == "refreshed"
     assert body["tenant_id"] == "test-tenant-id"
     assert "Blueprint content" in body["schema_blueprint_preview"]
+
+
+@pytest.mark.asyncio
+async def test_set_query_hints_success(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
+    update_mock = AsyncMock()
+    monkeypatch.setattr(admin, "update_tenant_query_hints", update_mock)
+
+    response = client.patch(
+        "/admin/tenant/test-tenant-id/query-hints",
+        json={"hints": "Use checklist.assignee_id for assigned tasks."},
+        headers={"x-admin-token": "secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "updated",
+        "hints": "Use checklist.assignee_id for assigned tasks.",
+    }
+    update_mock.assert_awaited_once_with("test-tenant-id", "Use checklist.assignee_id for assigned tasks.")

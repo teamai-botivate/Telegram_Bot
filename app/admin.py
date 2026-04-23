@@ -7,14 +7,17 @@ import jwt
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import Query as FastAPIQuery
 from pydantic import BaseModel, Field
 
 from .database import (
     create_tenant_record,
+    execute_tenant_query,
     fetch_google_sheet_data,
     fetch_postgres_schema,
     refresh_schema_blueprint,
     save_tenant_credentials,
+    update_tenant_query_hints,
 )
 
 load_dotenv()
@@ -213,3 +216,27 @@ async def refresh_tenant_schema(
         "tenant_id": tenant_id,
         "schema_blueprint_preview": blueprint[:500],
     }
+
+
+@router.get("/{tenant_id}/test-query")
+async def test_tenant_query(
+    tenant_id: str,
+    q: str = FastAPIQuery(..., description="SQL query to test"),
+    _: None = Depends(verify_admin_token),
+) -> dict[str, Any]:
+    try:
+        rows = await execute_tenant_query(tenant_id, q, allow_select_star=True)
+        return {"sql": q, "rows": rows, "error": None}
+    except Exception as e:
+        return {"sql": q, "rows": [], "error": str(e)}
+
+
+@router.patch("/{tenant_id}/query-hints")
+async def set_query_hints(
+    tenant_id: str,
+    payload: dict,
+    _: None = Depends(verify_admin_token),
+) -> dict[str, str]:
+    hints = payload.get("hints", "")
+    await update_tenant_query_hints(tenant_id, hints)
+    return {"status": "updated", "hints": hints}

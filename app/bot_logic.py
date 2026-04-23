@@ -19,6 +19,7 @@ else:
 from .database import (
     QueryExecutionError,
     SecurityError,
+    TenantDBConnectionError,
     execute_tenant_query,
     get_tenant_by_chat_id,
     get_tenant_credentials,
@@ -31,12 +32,16 @@ logger = logging.getLogger(__name__)
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
-RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-small-latest")
+RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-large-2512")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-4o-mini")
+SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-4o")
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
 RETRIEVAL_FAILURE_MESSAGE = "I wasn't able to retrieve that information right now. Please try rephrasing your question."
+DATABASE_CONNECTION_MESSAGE = (
+    "I'm having trouble connecting to your database right now. "
+    "Please contact Botivate support if this persists."
+)
 
 _openai_client: AsyncOpenAI | None = None
 
@@ -133,30 +138,142 @@ def _asks_for_everything(question: str) -> bool:
     return bool(re.search(r"\b(all|everything|entire|whole|complete)\b", question, flags=re.IGNORECASE))
 
 
-async def generate_sql_query(company_name: str, schema_blueprint: str, question: str) -> str:
+async def is_off_topic(text: str) -> bool:
+    prompt = (
+        "Does this message relate to business data queries like tasks, "
+        "meetings, deliveries, employees, or reports? "
+        "Reply only YES or NO.\n"
+        f"Message: {text}"
+    )
+    try:
+        answer = await _call_mistral(
+            [{"role": "user", "content": prompt}],
+            max_tokens=8,
+            model=RESPONSE_FORMAT_MODEL,
+        )
+    except Exception as exc:
+        logger.warning("Off-topic detection failed open: %s", exc)
+        return False
+
+    return answer.strip().upper().startswith("NO")
+
+
+def detect_multi_table_query(text: str) -> bool:
+    patterns = (
+        "each table",
+        "all tables",
+        "every table",
+        "from all",
+        "list tables",
+        "show tables",
+    )
+    lowered = text.lower()
+    return any(p in lowered for p in patterns)
+
+
+def _extract_table_names_from_blueprint(schema_blueprint: str) -> list[str]:
+    return re.findall(r"^Table `([^`]+)`", schema_blueprint, flags=re.MULTILINE)
+
+
+def build_table_aliases(schema_blueprint: str) -> str:
+    table_names = _extract_table_names_from_blueprint(schema_blueprint)
+    if not table_names:
+        return "No tables found."
+
+    aliases = {}
+    used = set()
+    for table in table_names:
+        for length in range(1, len(table) + 1):
+            candidate = table[:length].lower()
+            if candidate not in used:
+                aliases[table] = candidate
+                used.add(candidate)
+                break
+
+    return ", ".join(f"{t} -> {a}" for t, a in aliases.items())
+
+
+async def generate_sql_query(
+    company_name: str,
+    schema_blueprint: str,
+    question: str,
+    tenant_query_hints: str | None = None,
+) -> str:
     entities = _extract_entities(question)
-    limit_instruction = "Do not force LIMIT when user explicitly asks for everything."
-    if not _asks_for_everything(question):
-        limit_instruction = "Always add LIMIT 50."
+    dynamic_aliases = build_table_aliases(schema_blueprint)
 
-    system_prompt = (
-        f"You are the SQL generation engine for {company_name}.\n"
-        f"Schema blueprint:\n{schema_blueprint}\n\n"
-        "Rules:\n"
-        "- Output ONLY raw SQL, no markdown, no backticks, no explanation.\n"
-        "- Always use ILIKE for name/text searches, never exact match.\n"
-        "- Always alias tables (example: t for tasks, u for users).\n"
-        "- Never use SELECT *; always name columns explicitly.\n"
-        f"- {limit_instruction}\n"
-        "- Use FK relationships from blueprint for JOINs.\n"
-        "- For date queries use CURRENT_DATE.\n"
-        "- Only generate SELECT statements, never INSERT/UPDATE/DELETE/DROP."
-    )
-    user_prompt = (
-        f"User question:\n{question}\n\n"
-        f"Extracted entities (JSON):\n{json.dumps(entities, ensure_ascii=True)}"
-    )
+    hints_section = ""
+    if tenant_query_hints and tenant_query_hints.strip():
+        hints_section = f"""
+--- CLIENT-SPECIFIC HINTS ---
+{tenant_query_hints.strip()}
+"""
 
+    system_prompt = f"""
+You are an expert PostgreSQL data analyst. Your only job is to
+write a single, correct SQL SELECT query based on the user's
+question and the database schema provided below.
+
+--- DATABASE SCHEMA ---
+{schema_blueprint}
+
+--- TABLE ALIASES ---
+Use these short aliases for all tables:
+{dynamic_aliases}
+{hints_section}
+--- OUTPUT RULES ---
+- Output ONLY the raw SQL query
+- No markdown, no backticks, no explanation, no comments
+- No semicolon at the end
+- Only SELECT statements -- never INSERT, UPDATE, DELETE,
+  DROP, ALTER, CREATE, TRUNCATE, GRANT, REVOKE
+
+--- QUERY WRITING RULES ---
+- Always use the table aliases defined above
+- Never use SELECT * -- always list column names explicitly
+- Use ILIKE for all text/name searches, never exact match
+- Add LIMIT 50 unless user asks for all records
+- For JOINs, use FK relationships shown in the schema above
+- Prefer LEFT JOIN over INNER JOIN unless certain every
+  row has a match
+- If a column or table is not in the schema, do not invent it
+
+--- DATE AND TIME RULES ---
+- Use CURRENT_DATE for today's date
+- For month queries use EXTRACT(MONTH FROM col) and
+  EXTRACT(YEAR FROM col)
+- Never assume a date column name -- always check the schema
+
+--- COUNTING RULES ---
+- Always apply all relevant WHERE filters before counting
+- Never COUNT(*) a full table when a filtered count is implied
+- If counting items in a specific time period, filter by that
+  period explicitly
+
+--- MULTI-TABLE RULES ---
+- If user asks for data from multiple tables separately,
+  use UNION ALL with a literal 'table_source' column to
+  identify which table each row came from
+- Match column count and compatible types across UNION ALL parts
+
+--- VALIDATION SELF-CHECK ---
+Before writing the final query, verify:
+1. Does every column I use exist in the schema above?
+2. Are JOINs using the correct FK columns?
+3. Is WHERE filtering correctly for this question?
+4. Does the expected result make logical sense?
+5. Am I only selecting columns relevant to the question?
+
+--- USER QUESTION ---
+{question}
+
+--- EXTRACTED ENTITIES ---
+{json.dumps(entities, default=str)}
+
+Write the SQL query now:
+""".strip()
+
+    user_prompt = f"Generate the SQL query for: {question}"
     raw_sql = await _call_openai_sql(system_prompt, user_prompt)
     return _strip_code_fences(raw_sql)
 
@@ -262,6 +379,14 @@ async def handle_message(msg: BotMessage) -> None:
             await send_reply(msg, "Hi! I'm ready. Ask me a business question and I'll fetch it from your data.")
             return
 
+        if await is_off_topic(msg.text):
+            await send_reply(
+                msg,
+                "I'm Botivate Bot — I can only help you query your business data. "
+                "Try asking about tasks, meetings, deliveries, or your team.",
+            )
+            return
+
         tenant = await get_tenant_by_chat_id(msg.chat_id)
         if tenant is None:
             await send_reply(msg, ACCOUNT_NOT_FOUND_MESSAGE)
@@ -274,27 +399,72 @@ async def handle_message(msg: BotMessage) -> None:
 
         if credentials.db_type.lower() == "postgresql":
             blueprint = credentials.schema_blueprint or "No schema available."
+            final_error: str | None = None
+            sql_query = ""
+            query_rows: list[dict[str, Any]] = []
 
-            # ── SQL GENERATION (GPT-4o mini) ──
-            sql_query = await generate_sql_query(tenant.company_name, blueprint, msg.text)
-            sql_query = _validate_generated_sql(sql_query)
-            logger.info("Generated SQL for tenant %s: %s", tenant.id, sql_query)
+            if detect_multi_table_query(msg.text):
+                table_names = _extract_table_names_from_blueprint(blueprint)
+                logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
+                if not table_names:
+                    await send_reply(msg, "I couldn't find any tables in the schema blueprint for this tenant.")
+                    return
 
-            max_retries = 2
-            attempt = 0
-            while True:
-                try:
-                    query_rows = await execute_tenant_query(tenant.id, sql_query)
-                    break
-                except (QueryExecutionError, SecurityError) as exec_error:
-                    if attempt >= max_retries:
-                        await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
+                combined_rows: list[dict[str, Any]] = []
+                for table_name in table_names:
+                    table_sql = f"SELECT * FROM {table_name} LIMIT 2"
+                    logger.info(f"[SQL_OUT] {table_sql}")
+                    try:
+                        rows = await execute_tenant_query(tenant.id, table_sql, allow_select_star=True)
+                        for row in rows:
+                            normalized = dict(row)
+                            normalized["table_source"] = table_name
+                            combined_rows.append(normalized)
+                        logger.info(f"[SQL_OK] rows_returned={len(rows)}")
+                    except TenantDBConnectionError as e:
+                        logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
+                        await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
                         return
-                    attempt += 1
-                    logger.warning("SQL execution failed for tenant %s (attempt %s): %s", tenant.id, attempt, exec_error)
-                    sql_query = await fix_sql(sql_query, str(exec_error), blueprint)
-                    sql_query = _validate_generated_sql(sql_query)
-                    logger.info("Fixed SQL for tenant %s: %s", tenant.id, sql_query)
+                    except (QueryExecutionError, SecurityError) as e:
+                        logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
+                query_rows = combined_rows
+            else:
+                # ── SQL GENERATION (GPT-4o mini) ──
+                sql_query = await generate_sql_query(
+                    tenant.company_name,
+                    blueprint,
+                    msg.text,
+                    tenant_query_hints=getattr(credentials, "tenant_query_hints", None),
+                )
+                sql_query = _validate_generated_sql(sql_query)
+                logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
+                logger.info(f"[SQL_OUT] {sql_query}")
+
+                max_retries = 2
+                attempt = 0
+                while True:
+                    try:
+                        query_rows = await execute_tenant_query(tenant.id, sql_query)
+                        logger.info(f"[SQL_OK] rows_returned={len(query_rows)}")
+                        break
+                    except TenantDBConnectionError as exec_error:
+                        logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{exec_error}'")
+                        await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
+                        return
+                    except (QueryExecutionError, SecurityError) as exec_error:
+                        final_error = str(exec_error)
+                        logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{final_error}'")
+                        if attempt >= max_retries:
+                            logger.error(
+                                f"[SQL_FAILED] tenant={tenant.id} question='{msg.text}' "
+                                f"final_sql='{sql_query}' error='{final_error}'"
+                            )
+                            await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
+                            return
+                        attempt += 1
+                        sql_query = await fix_sql(sql_query, final_error, blueprint)
+                        sql_query = _validate_generated_sql(sql_query)
+                        logger.info(f"[SQL_OUT] {sql_query}")
 
             if not query_rows:
                 await send_reply(msg, "I couldn't find any data matching your request.")
