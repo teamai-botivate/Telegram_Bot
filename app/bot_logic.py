@@ -193,6 +193,66 @@ def build_table_aliases(schema_blueprint: str) -> str:
     return ", ".join(f"{t} -> {a}" for t, a in aliases.items())
 
 
+def _extract_columns_for_table(schema_blueprint: str, table_name: str) -> list[str]:
+    """
+    Extract column names for a specific table from the schema blueprint string.
+    """
+    pattern = rf"Table `{re.escape(table_name)}`.*?Columns:\s*([^\n]+)"
+    match = re.search(pattern, schema_blueprint, re.DOTALL)
+    if not match:
+        return []
+
+    columns_str = match.group(1)
+    # Parse "col_name (type), col_name2 (type)" format.
+    return re.findall(r"(\w+)\s*\(", columns_str)
+
+
+def build_dynamic_examples(schema_blueprint: str) -> str:
+    """
+    Build schema-based prompt examples using actual table and column names.
+    """
+    tables = _extract_table_names_from_blueprint(schema_blueprint)
+    if not tables:
+        return "No schema-derived examples available."
+
+    examples: list[str] = []
+
+    # Build UNION ALL example from first two detected tables.
+    if len(tables) >= 2:
+        t1, t2 = tables[0], tables[1]
+        t1_cols = _extract_columns_for_table(schema_blueprint, t1)
+        t2_cols = _extract_columns_for_table(schema_blueprint, t2)
+        if t1_cols and t2_cols:
+            t1_alias = t1[0].lower()
+            t2_alias = t2[0].lower()
+            shared_count = min(3, len(t1_cols), len(t2_cols))
+            t1_select = ", ".join([f"{t1_alias}.{c}::text" for c in t1_cols[:shared_count]])
+            t2_select = ", ".join([f"{t2_alias}.{c}::text" for c in t2_cols[:shared_count]])
+            examples.append(
+                f"""UNION ALL example using your schema:
+SELECT {t1_select}, '{t1}' AS table_source
+FROM {t1} AS {t1_alias}
+UNION ALL
+SELECT {t2_select}, '{t2}' AS table_source
+FROM {t2} AS {t2_alias}"""
+            )
+
+    # Build alias declaration example from first detected table.
+    first_table = tables[0]
+    first_cols = _extract_columns_for_table(schema_blueprint, first_table)
+    if first_cols:
+        alias = first_table[0].lower()
+        select_cols = ", ".join([f"{alias}.{c}" for c in first_cols[:4]])
+        examples.append(
+            f"""Alias declaration example using your schema:
+SELECT {select_cols}
+FROM {first_table} AS {alias}
+WHERE {alias}.{first_cols[0]} IS NOT NULL"""
+        )
+
+    return "\n\n".join(examples) if examples else "No schema-derived examples available."
+
+
 async def generate_sql_query(
     company_name: str,
     schema_blueprint: str,
@@ -200,23 +260,21 @@ async def generate_sql_query(
     auto_schema_hints: str | None = None,
 ) -> str:
     entities = _extract_entities(question)
+    entities_json = json.dumps(entities, default=str)
     dynamic_aliases = build_table_aliases(schema_blueprint)
+    dynamic_examples = build_dynamic_examples(schema_blueprint)
 
-    hints_section = ""
     if auto_schema_hints and auto_schema_hints.strip():
-        hints_section = f"""
---- AUTO-INFERRED SCHEMA RULES ---
-These rules were automatically detected from the database schema.
-Follow them precisely:
-{auto_schema_hints.strip()}
-"""
+        hints_section = auto_schema_hints.strip()
+    else:
+        hints_section = "No auto-inferred schema rules available."
 
     system_prompt = f"""
 You are an expert PostgreSQL data analyst. Your only job is to
 write a single, correct SQL SELECT query based on the user's
 question and the database schema provided below.
 
---- DATABASE SCHEMA ---
+━━━ DATABASE SCHEMA ━━━
 {schema_blueprint}
 
 ━━━ TABLE ALIASES ━━━
@@ -225,20 +283,23 @@ question and the database schema provided below.
 CRITICAL ALIAS RULE:
 Always declare the alias directly after the table name in
 FROM and JOIN clauses using AS keyword.
-Correct:   FROM delegation_done AS de LEFT JOIN users AS u
-Wrong:     FROM delegation_done WHERE de.column (alias used
+Correct:   FROM <table_name> AS <alias>
+Wrong:     FROM <table_name> WHERE <alias>.<column> (alias used
            before being declared)
 Never reference an alias that has not been declared first
 in the same query.
+
+━━━ AUTO-INFERRED SCHEMA RULES ━━━
 {hints_section}
---- OUTPUT RULES ---
+
+━━━ OUTPUT RULES ━━━
 - Output ONLY the raw SQL query
 - No markdown, no backticks, no explanation, no comments
 - No semicolon at the end
 - Only SELECT statements -- never INSERT, UPDATE, DELETE,
   DROP, ALTER, CREATE, TRUNCATE, GRANT, REVOKE
 
---- QUERY WRITING RULES ---
+━━━ QUERY WRITING RULES ━━━
 - Always use the table aliases defined above
 - Never use SELECT * -- always list column names explicitly
 - Use ILIKE for all text/name searches, never exact match
@@ -251,25 +312,28 @@ in the same query.
   row has a match
 - If a column or table is not in the schema, do not invent it
 
---- DATE AND TIME RULES ---
+━━━ DATE RULES ━━━
 - Use CURRENT_DATE for today's date
 - For month queries use EXTRACT(MONTH FROM col) and
   EXTRACT(YEAR FROM col)
 - Never assume a date column name -- always check the schema
 
---- COUNTING RULES ---
+━━━ COUNT RULES ━━━
 - Always apply all relevant WHERE filters before counting
 - Never COUNT(*) a full table when a filtered count is implied
 - If counting items in a specific time period, filter by that
   period explicitly
 
---- MULTI-TABLE RULES ---
+━━━ UNION ALL RULES ━━━
 - If user asks for data from multiple tables separately,
   use UNION ALL with a literal 'table_source' column to
   identify which table each row came from
 - Match column count and compatible types across UNION ALL parts
 
---- VALIDATION SELF-CHECK ---
+━━━ EXAMPLES FROM YOUR ACTUAL SCHEMA ━━━
+{dynamic_examples}
+
+━━━ VALIDATION SELF-CHECK ━━━
 Before writing the final query, verify:
 1. Does every column I use exist in the schema above?
 2. Are JOINs using the correct FK columns?
@@ -277,11 +341,11 @@ Before writing the final query, verify:
 4. Does the expected result make logical sense?
 5. Am I only selecting columns relevant to the question?
 
---- USER QUESTION ---
+━━━ QUESTION ━━━
 {question}
 
---- EXTRACTED ENTITIES ---
-{json.dumps(entities, default=str)}
+━━━ ENTITIES ━━━
+{entities_json}
 
 Write the SQL query now:
 """.strip()
@@ -292,13 +356,30 @@ Write the SQL query now:
 
 
 async def fix_sql(sql: str, error: str, schema_blueprint: str) -> str:
-    system_prompt = (
-        "You fix malformed PostgreSQL SELECT queries.\n"
-        f"Schema blueprint:\n{schema_blueprint}\n\n"
-        "Return ONLY corrected raw SQL query. No markdown, no explanation.\n"
-        "Only SELECT statements are allowed."
-    )
-    user_prompt = f"Broken SQL:\n{sql}\n\nPostgreSQL error:\n{error}"
+    system_prompt = f"""
+Fix this PostgreSQL query that produced an error.
+Return ONLY corrected raw SQL query. No markdown. No backticks. No explanation.
+Only SELECT statements are allowed.
+
+SCHEMA:
+{schema_blueprint}
+
+BROKEN SQL:
+{sql}
+
+ERROR:
+{error}
+
+COMMON FIXES:
+- UNION ALL type mismatch: cast all columns to ::text
+- Alias not found: declare alias in FROM/JOIN clause first
+- Column not found: check exact column name in schema above
+- Boolean column: use = TRUE or = FALSE, never ILIKE
+- Nullable column: use IS NULL or IS NOT NULL
+
+Corrected SQL:
+""".strip()
+    user_prompt = "Fix the SQL query."
 
     fixed_sql = await _call_openai_sql(system_prompt, user_prompt)
     return _strip_code_fences(fixed_sql)
