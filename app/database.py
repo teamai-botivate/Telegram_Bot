@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -353,68 +353,6 @@ async def create_tenant_record(company_name: str, active_modules: list[str]) -> 
 		return tenant.id
 
 
-def _normalize_modules(active_modules: list[str]) -> list[str]:
-	seen: set[str] = set()
-	normalized: list[str] = []
-	for module in active_modules:
-		cleaned = module.strip()
-		if not cleaned:
-			continue
-		key = cleaned.lower()
-		if key in seen:
-			continue
-		seen.add(key)
-		normalized.append(cleaned)
-	return normalized
-
-
-async def create_or_attach_tenant_record(company_name: str, active_modules: list[str]) -> tuple[uuid.UUID, bool]:
-	"""
-	Create a tenant when company is new, otherwise reuse existing tenant and merge modules.
-
-	Returns: (tenant_id, attached_to_existing)
-	"""
-	if session_factory is None:
-		raise RuntimeError("DATABASE_URL is not configured.")
-
-	normalized_company = company_name.strip()
-	if not normalized_company:
-		raise ValueError("company_name is required.")
-
-	requested_modules = _normalize_modules(active_modules)
-
-	async with session_factory() as session:
-		statement = (
-			select(Tenant)
-			.where(func.lower(Tenant.company_name) == normalized_company.lower())
-			.order_by(Tenant.created_at.asc())
-		)
-		result = await session.execute(statement)
-		company_tenants = list(result.scalars().all())
-
-		existing = None
-		for tenant in company_tenants:
-			if tenant.telegram_chat_id or tenant.whatsapp_number:
-				existing = tenant
-				break
-		if existing is None and company_tenants:
-			existing = company_tenants[0]
-
-		if existing is None:
-			tenant = Tenant(company_name=normalized_company, active_modules=requested_modules)
-			session.add(tenant)
-			await session.commit()
-			await session.refresh(tenant)
-			return tenant.id, False
-
-		merged = _normalize_modules([*(existing.active_modules or []), *requested_modules])
-		if merged != (existing.active_modules or []):
-			existing.active_modules = merged
-			await session.commit()
-
-		return existing.id, True
-
-
 async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_id: str) -> None:
 	if session_factory is None:
 		return
@@ -426,24 +364,8 @@ async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_
 			raise ValueError("Tenant not found.")
 
 		if platform.lower() == "telegram":
-			existing_stmt = select(Tenant).where(Tenant.telegram_chat_id == chat_id)
-			existing_result = await session.execute(existing_stmt)
-			existing = existing_result.scalars().first()
-			if existing is not None and existing.id != tenant.id:
-				raise ValueError(
-					"This Telegram chat is already linked to another service. "
-					"Add the new module to the existing company tenant instead of creating a separate tenant."
-				)
 			tenant.telegram_chat_id = chat_id
 		elif platform.lower() == "whatsapp":
-			existing_stmt = select(Tenant).where(Tenant.whatsapp_number == chat_id)
-			existing_result = await session.execute(existing_stmt)
-			existing = existing_result.scalars().first()
-			if existing is not None and existing.id != tenant.id:
-				raise ValueError(
-					"This WhatsApp number is already linked to another service. "
-					"Add the new module to the existing company tenant instead of creating a separate tenant."
-				)
 			tenant.whatsapp_number = chat_id
 
 		await session.commit()

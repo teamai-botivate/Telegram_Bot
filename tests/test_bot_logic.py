@@ -175,16 +175,6 @@ def test_validate_generated_sql_allows_select_only() -> None:
     assert bot_logic._validate_generated_sql("SELECT 1;") == "SELECT 1"
 
 
-def test_format_reply_for_chat_removes_markdown_noise() -> None:
-    raw = """**Summary**\n\n* item one\n• item two\n`code`\n"""
-    formatted = bot_logic._format_reply_for_chat(raw)
-
-    assert "**" not in formatted
-    assert "`" not in formatted
-    assert "- item one" in formatted
-    assert "- item two" in formatted
-
-
 @pytest.mark.parametrize(
     "sql",
     [

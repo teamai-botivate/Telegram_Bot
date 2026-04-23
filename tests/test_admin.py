@@ -94,8 +94,8 @@ async def test_create_full_success(monkeypatch) -> None:
     mock_fetch_schema = AsyncMock(return_value=("Table `orders` | Columns: id (uuid)", "Auto hints"))
     monkeypatch.setattr(admin, "fetch_postgres_schema", mock_fetch_schema)
 
-    mock_attach = AsyncMock(return_value=("new-tenant-uuid", False))
-    monkeypatch.setattr(admin, "create_or_attach_tenant_record", mock_attach)
+    mock_create = AsyncMock(return_value="new-tenant-uuid")
+    monkeypatch.setattr(admin, "create_tenant_record", mock_create)
 
     mock_save = AsyncMock()
     monkeypatch.setattr(admin, "save_tenant_credentials", mock_save)
@@ -116,7 +116,6 @@ async def test_create_full_success(monkeypatch) -> None:
     data = response.json()
     assert data["status"] == "created"
     assert "tenant_id" in data
-    mock_attach.assert_awaited_once_with("Acme Corp", ["general"])
 
 
 @pytest.mark.asyncio
@@ -127,8 +126,8 @@ async def test_create_full_google_sheets_success(monkeypatch) -> None:
     mock_fetch = MagicMock(return_value=("Google Sheets Blueprint", "Snapshot data"))
     monkeypatch.setattr(admin, "fetch_google_sheet_data", mock_fetch)
 
-    mock_attach = AsyncMock(return_value=("gs-tenant-uuid", False))
-    monkeypatch.setattr(admin, "create_or_attach_tenant_record", mock_attach)
+    mock_create = AsyncMock(return_value="gs-tenant-uuid")
+    monkeypatch.setattr(admin, "create_tenant_record", mock_create)
 
     mock_save = AsyncMock()
     monkeypatch.setattr(admin, "save_tenant_credentials", mock_save)
@@ -153,7 +152,6 @@ async def test_create_full_google_sheets_success(monkeypatch) -> None:
 
     mock_fetch.assert_called_once_with("test_sheet_id", '{"type": "service_account"}')
     mock_save.assert_awaited_once()
-    mock_attach.assert_awaited_once_with("Google Sheets Corp", ["general"])
 
     call_kwargs = mock_save.call_args.kwargs
     assert call_kwargs["tenant_id"] == "gs-tenant-uuid"
@@ -161,38 +159,6 @@ async def test_create_full_google_sheets_success(monkeypatch) -> None:
     assert call_kwargs["connection_url"] == "google_sheets://test_sheet_id"
     assert call_kwargs["google_credentials"] == '{"type": "service_account"}'
     assert call_kwargs["schema_blueprint"] == "Google Sheets Blueprint"
-
-
-@pytest.mark.asyncio
-async def test_create_full_attaches_existing_company(monkeypatch) -> None:
-    monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
-
-    mock_fetch_schema = AsyncMock(return_value=("Table `orders` | Columns: id (uuid)", "Auto hints"))
-    monkeypatch.setattr(admin, "fetch_postgres_schema", mock_fetch_schema)
-
-    mock_attach = AsyncMock(return_value=("existing-tenant-uuid", True))
-    monkeypatch.setattr(admin, "create_or_attach_tenant_record", mock_attach)
-
-    mock_save = AsyncMock()
-    monkeypatch.setattr(admin, "save_tenant_credentials", mock_save)
-
-    response = client.post(
-        "/admin/tenant/create-full",
-        json={
-            "company_name": "Acme Corp",
-            "active_modules": ["general", "task-tracker"],
-            "db_type": "postgresql",
-            "connection_url": "postgresql://user:pw@localhost:5432/db",
-            "ssl_required": False
-        },
-        headers={"x-admin-token": "secret"}
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "attached"
-    assert body["tenant_id"] == "existing-tenant-uuid"
-    assert "reused" in body["message"].lower()
 
 
 @pytest.mark.asyncio
