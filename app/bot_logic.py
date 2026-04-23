@@ -526,7 +526,7 @@ If the question is in Hindi, reply in Hindi.
 If the question is in any other language, reply in that language.
 Database data language does not influence the reply language.
 
-━━━ DATA ━━━
+━━━ DATA ━━━"""
 
     reply = await _call_mistral(
         [
