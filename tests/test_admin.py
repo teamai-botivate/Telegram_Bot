@@ -35,7 +35,7 @@ async def test_connect_db_success(monkeypatch) -> None:
     monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
 
     mock_blueprint = "Table `orders` | Columns: id (uuid)"
-    mock_fetch_schema = AsyncMock(return_value=mock_blueprint)
+    mock_fetch_schema = AsyncMock(return_value=(mock_blueprint, "Auto hints"))
     monkeypatch.setattr(admin, "fetch_postgres_schema", mock_fetch_schema)
 
     mock_save = AsyncMock()
@@ -62,6 +62,7 @@ async def test_connect_db_success(monkeypatch) -> None:
     assert call_kwargs["db_type"] == "postgresql"
     assert call_kwargs["connection_url"] == "postgresql://user:pw@localhost:5432/db"
     assert call_kwargs["schema_blueprint"] == mock_blueprint
+    assert call_kwargs["auto_schema_hints"] == "Auto hints"
 
 
 @pytest.mark.asyncio
@@ -90,7 +91,7 @@ async def test_connect_db_fails_when_db_down(monkeypatch) -> None:
 async def test_create_full_success(monkeypatch) -> None:
     monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
 
-    mock_fetch_schema = AsyncMock(return_value="Table `orders` | Columns: id (uuid)")
+    mock_fetch_schema = AsyncMock(return_value=("Table `orders` | Columns: id (uuid)", "Auto hints"))
     monkeypatch.setattr(admin, "fetch_postgres_schema", mock_fetch_schema)
 
     mock_create = AsyncMock(return_value="new-tenant-uuid")
@@ -175,23 +176,3 @@ async def test_refresh_schema_success(monkeypatch) -> None:
     assert body["status"] == "refreshed"
     assert body["tenant_id"] == "test-tenant-id"
     assert "Blueprint content" in body["schema_blueprint_preview"]
-
-
-@pytest.mark.asyncio
-async def test_set_query_hints_success(monkeypatch) -> None:
-    monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
-    update_mock = AsyncMock()
-    monkeypatch.setattr(admin, "update_tenant_query_hints", update_mock)
-
-    response = client.patch(
-        "/admin/tenant/test-tenant-id/query-hints",
-        json={"hints": "Use checklist.assignee_id for assigned tasks."},
-        headers={"x-admin-token": "secret"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "updated",
-        "hints": "Use checklist.assignee_id for assigned tasks.",
-    }
-    update_mock.assert_awaited_once_with("test-tenant-id", "Use checklist.assignee_id for assigned tasks.")

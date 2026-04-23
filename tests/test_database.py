@@ -66,9 +66,9 @@ def test_sanitize_select_sql_rejects_non_select() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_tenant_query_runs_explain_before_execution(monkeypatch) -> None:
+async def test_execute_tenant_query_executes_query_directly_without_explain(monkeypatch) -> None:
     connection = SimpleNamespace(
-        fetch=AsyncMock(side_effect=[[{"QUERY PLAN": "Seq Scan"}], [{"id": 1, "name": "Alice"}]]),
+        fetch=AsyncMock(return_value=[{"id": 1, "name": "Alice"}]),
         close=AsyncMock(),
     )
     monkeypatch.setattr(database, "decrypt_and_connect", AsyncMock(return_value=connection))
@@ -76,14 +76,14 @@ async def test_execute_tenant_query_runs_explain_before_execution(monkeypatch) -
     rows = await database.execute_tenant_query("tenant-id", "SELECT id, name FROM users LIMIT 10")
 
     assert rows == [{"id": 1, "name": "Alice"}]
-    assert connection.fetch.await_count == 2
+    assert connection.fetch.await_count == 1
     first_call_sql = connection.fetch.await_args_list[0].args[0]
-    assert first_call_sql.startswith("EXPLAIN ")
+    assert first_call_sql == "SELECT id, name FROM users LIMIT 10"
     connection.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_execute_tenant_query_raises_query_error_when_explain_fails(monkeypatch) -> None:
+async def test_execute_tenant_query_raises_query_error_when_query_fails(monkeypatch) -> None:
     class FakePgError(database.asyncpg.PostgresError):
         pass
 
@@ -96,4 +96,4 @@ async def test_execute_tenant_query_raises_query_error_when_explain_fails(monkey
     with pytest.raises(database.QueryExecutionError) as exc_info:
         await database.execute_tenant_query("tenant-id", "SELECT id name FROM users")
 
-    assert "EXPLAIN failed" in str(exc_info.value)
+    assert "Failed to execute query" in str(exc_info.value)

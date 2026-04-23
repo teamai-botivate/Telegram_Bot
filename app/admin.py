@@ -17,7 +17,6 @@ from .database import (
     fetch_postgres_schema,
     refresh_schema_blueprint,
     save_tenant_credentials,
-    update_tenant_query_hints,
 )
 
 load_dotenv()
@@ -96,6 +95,7 @@ async def connect_tenant_db(
     _: None = Depends(verify_admin_token),
 ) -> dict[str, Any]:
     schema_blueprint: str | None = None
+    auto_schema_hints: str | None = None
     google_credentials: str | None = None
     connection_url = ""
 
@@ -103,7 +103,7 @@ async def connect_tenant_db(
         if not payload.connection_url:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="connection_url is required for PostgreSQL.")
         try:
-            schema_blueprint = await fetch_postgres_schema(payload.connection_url)
+            schema_blueprint, auto_schema_hints = await fetch_postgres_schema(payload.connection_url)
         except Exception as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database connection failed: {e}")
         connection_url = payload.connection_url
@@ -127,6 +127,7 @@ async def connect_tenant_db(
             db_type=payload.db_type,
             connection_url=connection_url,
             schema_blueprint=schema_blueprint,
+            auto_schema_hints=auto_schema_hints,
             ssl_required=payload.ssl_required if payload.db_type.lower() == "postgresql" else False,
             google_credentials=google_credentials,
         )
@@ -142,6 +143,7 @@ async def create_full_tenant(
     _: None = Depends(verify_admin_token),
 ) -> dict[str, Any]:
     schema_blueprint: str | None = None
+    auto_schema_hints: str | None = None
     google_credentials: str | None = None
     connection_url = ""
 
@@ -149,7 +151,7 @@ async def create_full_tenant(
         if not payload.connection_url:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="connection_url is required for PostgreSQL.")
         try:
-            schema_blueprint = await fetch_postgres_schema(payload.connection_url)
+            schema_blueprint, auto_schema_hints = await fetch_postgres_schema(payload.connection_url)
         except Exception as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Database connection failed: {e}")
         connection_url = payload.connection_url
@@ -174,6 +176,7 @@ async def create_full_tenant(
         db_type=payload.db_type,
         connection_url=connection_url,
         schema_blueprint=schema_blueprint,
+        auto_schema_hints=auto_schema_hints,
         ssl_required=payload.ssl_required if payload.db_type.lower() == "postgresql" else False,
         google_credentials=google_credentials,
     )
@@ -229,14 +232,3 @@ async def test_tenant_query(
         return {"sql": q, "rows": rows, "error": None}
     except Exception as e:
         return {"sql": q, "rows": [], "error": str(e)}
-
-
-@router.patch("/{tenant_id}/query-hints")
-async def set_query_hints(
-    tenant_id: str,
-    payload: dict,
-    _: None = Depends(verify_admin_token),
-) -> dict[str, str]:
-    hints = payload.get("hints", "")
-    await update_tenant_query_hints(tenant_id, hints)
-    return {"status": "updated", "hints": hints}

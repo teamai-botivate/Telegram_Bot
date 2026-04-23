@@ -45,7 +45,8 @@ class TenantDBCredential(Base):
     # Stores the auto-discovered structural blueprint
     schema_blueprint: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    tenant_query_hints: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Auto-generated business rules inferred from schema introspection.
+    auto_schema_hints: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     ssl_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -184,6 +184,7 @@ async def save_tenant_credentials(
 	db_type: str,
 	connection_url: str,
 	schema_blueprint: str | None = None,
+	auto_schema_hints: str | None = None,
 	ssl_required: bool = True,
 	google_credentials: str | None = None,
 ) -> TenantDBCredential:
@@ -210,6 +211,7 @@ async def save_tenant_credentials(
 				db_type=db_type,
 				connection_url=encrypted_url,
 				schema_blueprint=schema_blueprint,
+				auto_schema_hints=auto_schema_hints,
 				ssl_required=ssl_required,
 				google_credentials=encrypted_creds,
 			)
@@ -219,6 +221,8 @@ async def save_tenant_credentials(
 			credential.connection_url = encrypted_url
 			if schema_blueprint is not None:
 				credential.schema_blueprint = schema_blueprint
+			if auto_schema_hints is not None:
+				credential.auto_schema_hints = auto_schema_hints
 			credential.ssl_required = ssl_required
 			if encrypted_creds:
 				credential.google_credentials = encrypted_creds
@@ -321,11 +325,6 @@ async def execute_tenant_query(
 			safe_sql,
 		)
 
-		try:
-			await connection.fetch(f"EXPLAIN {safe_sql}", *params)
-		except asyncpg.PostgresError as e:
-			raise QueryExecutionError(f"EXPLAIN failed: {e}")
-
 		rows = await connection.fetch(safe_sql, *params)
 		return [dict(row) for row in rows]
 	except QueryExecutionError:
@@ -372,7 +371,7 @@ async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_
 		await session.commit()
 
 
-async def fetch_postgres_schema(connection_string: str) -> str:
+async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
 	connection: asyncpg.Connection | None = None
 	try:
 		# asyncpg doesn't understand sslmode= in URL; strip it and pass ssl= explicitly.
@@ -405,7 +404,7 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		enums = {row["enum_name"]: row["enum_values"] for row in enum_rows}
 
 		column_sql = """
-		SELECT table_schema, table_name, column_name, data_type, udt_name
+		SELECT table_schema, table_name, column_name, data_type, udt_name, is_nullable
 		FROM information_schema.columns
 		WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
 		ORDER BY table_schema, table_name, ordinal_position;
@@ -433,6 +432,25 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		"""
 		fk_rows = await connection.fetch(fk_sql)
 
+		status_keywords = {
+			"submitted",
+			"completed",
+			"done",
+			"approved",
+			"closed",
+			"finished",
+			"resolved",
+			"verified",
+			"paid",
+			"delivered",
+			"started",
+			"ended",
+			"cancelled",
+		}
+		completion_table_keywords = {"done", "completed", "archived", "history", "log", "audit"}
+		reference_column_names = {"id", "user_id", "employee_id", "created_by", "assigned_to", "given_by"}
+		date_like_types = {"date", "timestamp without time zone", "timestamp with time zone"}
+
 		tables: dict[str, dict[str, Any]] = {}
 		for row in rows:
 			schema = row["table_schema"]
@@ -440,6 +458,11 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 			column = row["column_name"]
 			data_type = row["data_type"]
 			udt_name = row["udt_name"]
+			try:
+				is_nullable = row["is_nullable"]
+			except Exception:
+				is_nullable = "YES"
+			nullable = str(is_nullable).upper() == "YES"
 
 			if data_type == "USER-DEFINED" and udt_name in enums:
 				data_type = f"enum({', '.join(enums[udt_name])})"
@@ -450,13 +473,25 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 					"schema": schema,
 					"table": table,
 					"columns": [],
+					"column_meta": [],
 					"text_columns": [],
+					"bool_columns": [],
 					"fks": [],
 				}
 			tables[full_name]["columns"].append(f"{column} ({data_type})")
+			tables[full_name]["column_meta"].append(
+				{
+					"name": column,
+					"data_type": data_type,
+					"nullable": nullable,
+				}
+			)
 			if data_type.lower() in {"text", "character varying", "character", "varchar"}:
 				tables[full_name]["text_columns"].append(column)
+			if data_type.lower() == "boolean":
+				tables[full_name]["bool_columns"].append(column)
 
+		fk_details: list[dict[str, str]] = []
 		for fk in fk_rows:
 			src_schema = fk["table_schema"]
 			src_table = fk["table_name"]
@@ -469,18 +504,24 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 			dst_full = f"{dst_schema}.{dst_table}" if dst_schema != "public" else dst_table
 			if src_full in tables:
 				tables[src_full]["fks"].append(f"FK: {src_full}.{src_col} -> {dst_full}.{dst_col}")
+			fk_details.append(
+				{
+					"src_table": src_full,
+					"src_col": src_col,
+					"dst_table": dst_full,
+					"dst_col": dst_col,
+				}
+			)
 
 		relationship_lines: list[str] = []
-		for fk in fk_rows:
-			src_schema = fk["table_schema"]
-			src_table = fk["table_name"]
-			src_col = fk["column_name"]
-			dst_schema = fk["foreign_table_schema"]
-			dst_table = fk["foreign_table_name"]
-			dst_col = fk["foreign_column_name"]
-			src_full = f"{src_schema}.{src_table}" if src_schema != "public" else src_table
-			dst_full = f"{dst_schema}.{dst_table}" if dst_schema != "public" else dst_table
-			relationship_lines.append(f"{src_full}.{src_col} -> {dst_full}.{dst_col}")
+		for fk in fk_details:
+			relationship_lines.append(f"{fk['src_table']}.{fk['src_col']} -> {fk['dst_table']}.{fk['dst_col']}")
+
+		fk_by_table_col: dict[tuple[str, str], dict[str, str]] = {}
+		for fk in fk_details:
+			fk_by_table_col[(fk["src_table"], fk["src_col"])] = fk
+
+		auto_hints_lines: list[str] = []
 
 		blueprint = "Database Blueprint (PostgreSQL):\n"
 		blueprint += "RELATIONSHIPS (use these for JOINs):\n"
@@ -507,7 +548,31 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 			blueprint += f"Table `{table_name}` | Rows: ~{row_count_str}\n"
 			blueprint += f"Columns: {', '.join(info['columns'])}\n"
 
+			table_hint_lines: list[str] = []
+
+			# a) Nullable status timestamps/dates
+			for col_meta in info.get("column_meta", []):
+				col_name = col_meta["name"]
+				dtype = str(col_meta["data_type"]).lower()
+				nullable = bool(col_meta.get("nullable", True))
+				if not nullable:
+					continue
+				if dtype not in date_like_types:
+					continue
+				lowered = col_name.lower()
+				if any(k in lowered for k in status_keywords):
+					hint = (
+						f"Status hint: {table_name}.{col_name} IS NULL = pending/incomplete, "
+						f"IS NOT NULL = done/complete"
+					)
+					table_hint_lines.append(hint)
+
+			# b) Boolean columns
+			for bool_col in info.get("bool_columns", []):
+				table_hint_lines.append(f"Boolean: {bool_col} -- use = TRUE or = FALSE, never ILIKE")
+
 			for text_col in info["text_columns"]:
+				samples: list[str] = []
 				try:
 					quoted_col = _quote_ident(text_col)
 					sample_rows = await connection.fetch(
@@ -517,13 +582,56 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 					samples = [str(sample["value"]) for sample in sample_rows]
 					if samples:
 						blueprint += f"Sample `{text_col}`: {samples}\n"
+
+						# c) Enum-like text columns (best-effort): count distinct values up to 10.
+						try:
+							cnt_row = await connection.fetchrow(
+								f"SELECT COUNT(*)::int AS cnt FROM ("
+								f"SELECT DISTINCT {quoted_col} AS v FROM {quoted_schema}.{quoted_table} "
+								f"WHERE {quoted_col} IS NOT NULL LIMIT 10"
+								f") s"
+							)
+							cnt = int(cnt_row["cnt"]) if cnt_row and cnt_row["cnt"] is not None else 10
+							if cnt < 10:
+								table_hint_lines.append(f"Allowed values for {text_col}: {samples}")
+								table_hint_lines.append("Use exact match or ILIKE only with these values")
+						except Exception:
+							pass
 				except Exception:
 					# Best effort enrichment; skip sample extraction failures silently.
 					pass
 
+			# d) Completion hint based on child table name
+			child_table_base = table.lower()
+			if any(k in child_table_base for k in completion_table_keywords):
+				for fk in fk_details:
+					if fk["src_table"] != table_name:
+						continue
+					table_hint_lines.append(
+						f"Completion hint: presence in {fk['src_table']} means the record in {fk['dst_table']} is complete"
+					)
+
+			# e) Reference columns hint (only if there is a FK)
+			for col_meta in info.get("column_meta", []):
+				col_name = col_meta["name"]
+				if col_name.lower() not in reference_column_names:
+					continue
+				fk = fk_by_table_col.get((table_name, col_name))
+				if not fk:
+					continue
+				table_hint_lines.append(
+					f"Reference: {col_name} links to {fk['dst_table']} via FK -- use JOIN for human-readable names"
+				)
+
+			if table_hint_lines:
+				for line in table_hint_lines:
+					blueprint += f"{line}\n"
+				auto_hints_lines.extend(table_hint_lines)
+
 			blueprint += "\n"
 
-		return blueprint.strip()
+		auto_hints = "\n".join(auto_hints_lines).strip()
+		return blueprint.strip(), auto_hints
 	except Exception as e:
 		raise ValueError(f"Failed to extract database blueprint: {_describe_connection_exception(e)}")
 	finally:
@@ -546,7 +654,7 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 			raise ValueError("Schema refresh is supported only for PostgreSQL tenants.")
 		connection_url = _decrypt_credential_value(credential.connection_url)
 
-	blueprint = await fetch_postgres_schema(connection_url)
+	blueprint, auto_hints = await fetch_postgres_schema(connection_url)
 
 	async with session_factory() as session:
 		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
@@ -555,24 +663,10 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		if credential is None:
 			raise ValueError("Tenant credentials not found.")
 		credential.schema_blueprint = blueprint
+		credential.auto_schema_hints = auto_hints
 		await session.commit()
 
 	return blueprint
-
-
-async def update_tenant_query_hints(tenant_id: uuid.UUID | str, hints: str) -> None:
-	if session_factory is None:
-		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
-
-	tenant_uuid = uuid.UUID(str(tenant_id))
-	async with session_factory() as session:
-		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
-		result = await session.execute(statement)
-		credential = result.scalar_one_or_none()
-		if credential is None:
-			raise ValueError("Tenant credentials not found.")
-		credential.tenant_query_hints = hints
-		await session.commit()
 
 
 def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:

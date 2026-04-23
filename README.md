@@ -5,7 +5,7 @@ Botivate bot backend with a platform-agnostic core and a bring-your-own-database
 ## Project Overview
 
 The application normalizes incoming platform payloads into a shared BotMessage object and runs one common pipeline:
-intent classification -> tenant lookup -> tenant SQL template lookup -> tenant database query -> LLM response formatting -> platform-specific reply sender.
+off-topic detection -> tenant lookup -> SQL generation -> tenant database query -> LLM response formatting -> platform-specific reply sender.
 
 Platform channels:
 - Telegram: active sender and webhook endpoint.
@@ -57,7 +57,11 @@ These endpoints are protected by header x-admin-token with ADMIN_SECRET_TOKEN va
 
 - POST /admin/tenant/{tenant_id}/refresh-schema
 	- Re-runs PostgreSQL schema introspection
-	- Updates stored `schema_blueprint` for that tenant
+	- Updates stored `schema_blueprint` and `auto_schema_hints` for that tenant
+
+- GET /admin/tenant/{tenant_id}/test-query?q=...
+	- Runs an exact SQL query directly against the tenant DB (admin-only)
+	- Returns rows + error for debugging without going through Telegram/WhatsApp
 
 ## Render Deployment
 
@@ -113,13 +117,24 @@ Replace only the API call block at that marker (request URL, headers, and payloa
 
 ## SQL Generation Pipeline
 
-- SQL generation uses GPT (`SQL_GENERATION_MODEL`, default `gpt-4.1`) via OpenAI SDK.
-- Reply formatting uses Mistral small (`mistral-small-latest`).
+- SQL generation uses OpenAI Chat Completions (`SQL_GENERATION_MODEL`, default `gpt-4o`).
+- Reply formatting uses Mistral (`RESPONSE_FORMAT_MODEL`, default `mistral-large-2512`).
 - Tenant-specific schema blueprint is stored in `tenant_db_credentials.schema_blueprint`.
 - Schema blueprint can be refreshed on demand with:
 	- `POST /admin/tenant/{tenant_id}/refresh-schema`
 - SQL execution includes self-healing retry logic:
 	- On malformed SQL / PostgreSQL errors, the bot calls `fix_sql()` and retries automatically (up to 2 retries).
+
+## Automatic Schema Intelligence
+
+During schema introspection (on onboarding and refresh), the system also generates `tenant_db_credentials.auto_schema_hints`:
+- Nullable timestamp/date "status" columns (pending vs done via `IS NULL` / `IS NOT NULL`)
+- Boolean columns (use `= TRUE` / `= FALSE`, never `ILIKE`)
+- Enum-like text columns (suggested allowed values)
+- FK-based relationship hints for JOIN direction and readable lookups
+
+No per-tenant manual hints are required. If the tenant schema changes, call:
+- `POST /admin/tenant/{tenant_id}/refresh-schema`
 
 ## Project Structure
 

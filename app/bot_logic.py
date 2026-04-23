@@ -197,16 +197,18 @@ async def generate_sql_query(
     company_name: str,
     schema_blueprint: str,
     question: str,
-    tenant_query_hints: str | None = None,
+    auto_schema_hints: str | None = None,
 ) -> str:
     entities = _extract_entities(question)
     dynamic_aliases = build_table_aliases(schema_blueprint)
 
     hints_section = ""
-    if tenant_query_hints and tenant_query_hints.strip():
+    if auto_schema_hints and auto_schema_hints.strip():
         hints_section = f"""
---- CLIENT-SPECIFIC HINTS ---
-{tenant_query_hints.strip()}
+--- AUTO-INFERRED SCHEMA RULES ---
+These rules were automatically detected from the database schema.
+Follow them precisely:
+{auto_schema_hints.strip()}
 """
 
     system_prompt = f"""
@@ -217,9 +219,17 @@ question and the database schema provided below.
 --- DATABASE SCHEMA ---
 {schema_blueprint}
 
---- TABLE ALIASES ---
-Use these short aliases for all tables:
+━━━ TABLE ALIASES ━━━
 {dynamic_aliases}
+
+CRITICAL ALIAS RULE:
+Always declare the alias directly after the table name in
+FROM and JOIN clauses using AS keyword.
+Correct:   FROM delegation_done AS de LEFT JOIN users AS u
+Wrong:     FROM delegation_done WHERE de.column (alias used
+           before being declared)
+Never reference an alias that has not been declared first
+in the same query.
 {hints_section}
 --- OUTPUT RULES ---
 - Output ONLY the raw SQL query
@@ -232,6 +242,9 @@ Use these short aliases for all tables:
 - Always use the table aliases defined above
 - Never use SELECT * -- always list column names explicitly
 - Use ILIKE for all text/name searches, never exact match
+- Use ILIKE only on text/varchar columns
+- For boolean columns use = TRUE or = FALSE (never ILIKE)
+- For nullable timestamp/date columns use IS NULL or IS NOT NULL
 - Add LIMIT 50 unless user asks for all records
 - For JOINs, use FK relationships shown in the schema above
 - Prefer LEFT JOIN over INNER JOIN unless certain every
@@ -434,7 +447,7 @@ async def handle_message(msg: BotMessage) -> None:
                     tenant.company_name,
                     blueprint,
                     msg.text,
-                    tenant_query_hints=getattr(credentials, "tenant_query_hints", None),
+                    auto_schema_hints=getattr(credentials, "auto_schema_hints", None),
                 )
                 sql_query = _validate_generated_sql(sql_query)
                 logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
