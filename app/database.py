@@ -630,7 +630,29 @@ async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
 
 			blueprint += "\n"
 
-		auto_hints = "\n".join(auto_hints_lines).strip()
+		nullable_date_sql = """
+		SELECT table_name, column_name, data_type
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		AND is_nullable = 'YES'
+		AND data_type IN (
+			'date', 'timestamp', 'timestamp without time zone',
+			'timestamp with time zone', 'timestamptz'
+		)
+		AND table_name NOT IN (
+			'pg_stat_statements', 'alembic_version'
+		)
+		ORDER BY table_name, column_name
+		"""
+		nullable_date_rows = await connection.fetch(nullable_date_sql)
+
+		for r in nullable_date_rows:
+			hint = f"Status hint: {r['table_name']}.{r['column_name']} IS NULL = pending/incomplete, IS NOT NULL = done/complete"
+			auto_hints_lines.append(hint)
+
+		pending_rule = "PENDING RULE: When user asks about pending, incomplete, or not done records — check the Status hints below first. Use IS NULL on the indicated column instead of filtering by a status value. Only use status column if schema sample values explicitly contain the word 'pending'."
+		
+		auto_hints = pending_rule + "\n" + "\n".join(auto_hints_lines).strip()
 		return blueprint.strip(), auto_hints
 	except Exception as e:
 		raise ValueError(f"Failed to extract database blueprint: {_describe_connection_exception(e)}")
