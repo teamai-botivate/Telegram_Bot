@@ -9,8 +9,20 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+try:
+    from openai import AsyncOpenAI
+except ImportError as _openai_error:  # pragma: no cover - exercised in environments without openai installed
+    AsyncOpenAI = Any  # type: ignore[assignment]
+else:
+    _openai_error = None
 
-from .database import QueryExecutionError, execute_tenant_query, get_tenant_by_chat_id, get_tenant_credentials
+from .database import (
+    QueryExecutionError,
+    SecurityError,
+    execute_tenant_query,
+    get_tenant_by_chat_id,
+    get_tenant_credentials,
+)
 from .platforms.base import BotMessage, Platform, send_reply
 
 load_dotenv()
@@ -19,16 +31,25 @@ logger = logging.getLogger(__name__)
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
-SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "codestral-latest")
 RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-small-latest")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-4o-mini")
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
-SQL_DEFAULT_ROW_LIMIT = int(os.getenv("SQL_DEFAULT_ROW_LIMIT", "50"))
-SQL_FULL_ROW_LIMIT = int(os.getenv("SQL_FULL_ROW_LIMIT", "500"))
+RETRIEVAL_FAILURE_MESSAGE = "I wasn't able to retrieve that information right now. Please try rephrasing your question."
+
+_openai_client: AsyncOpenAI | None = None
 
 
-class NeedsClarificationError(Exception):
-    """Raised when user input is ambiguous and needs follow-up."""
+def _get_openai_client() -> AsyncOpenAI:
+    global _openai_client
+    if _openai_error is not None:
+        raise RuntimeError("openai package is not installed. Add it to environment with pip install -r requirements.txt.")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured in .env.")
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
 
 
 def _extract_assistant_text(response_data: dict[str, Any]) -> str:
@@ -70,200 +91,159 @@ async def _call_mistral(messages: list[dict[str, str]], max_tokens: int, model: 
     return assistant_text or ""
 
 
+async def _call_openai_sql(system_prompt: str, user_prompt: str) -> str:
+    client = _get_openai_client()
+    completion = await client.chat.completions.create(
+        model=SQL_GENERATION_MODEL,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    content = completion.choices[0].message.content
+    return (content or "").strip()
+
+
 def _strip_code_fences(text: str) -> str:
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json|sql)?", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^```(?:sql|json)?", "", cleaned, flags=re.IGNORECASE).strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
     return cleaned
 
 
-def _extract_json_dict(raw: str) -> dict[str, Any] | None:
-    cleaned = _strip_code_fences(raw)
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
+def _extract_entities(question: str) -> dict[str, Any]:
+    dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", question)
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", question)
+    numbers = re.findall(r"\b\d+(?:\.\d+)?\b", question)
+    quoted_terms = re.findall(r"['\"]([^'\"]+)['\"]", question)
 
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    return {
+        "dates": dates,
+        "emails": emails,
+        "numbers": numbers,
+        "quoted_terms": quoted_terms,
+        "today_utc": datetime.now(timezone.utc).date().isoformat(),
+    }
 
 
-def _is_full_result_request(question: str) -> bool:
-    return bool(re.search(r"\b(all|whole|full|complete|entire)\b", question, flags=re.IGNORECASE))
+def _asks_for_everything(question: str) -> bool:
+    return bool(re.search(r"\b(all|everything|entire|whole|complete)\b", question, flags=re.IGNORECASE))
 
 
 async def generate_sql_query(company_name: str, schema_blueprint: str, question: str) -> str:
-    row_limit = SQL_FULL_ROW_LIMIT if _is_full_result_request(question) else SQL_DEFAULT_ROW_LIMIT
-    today_utc = datetime.now(timezone.utc).date().isoformat()
+    entities = _extract_entities(question)
+    limit_instruction = "Do not force LIMIT when user explicitly asks for everything."
+    if not _asks_for_everything(question):
+        limit_instruction = "Always add LIMIT 50."
+
     system_prompt = (
-        f"You are the Text-to-SQL backend for {company_name}.\n"
-        "You must translate the user's question into a valid PostgreSQL read-only query.\n"
-        f"Today's UTC date is {today_utc}.\n\n"
-        f"Database Schema:\n{schema_blueprint}\n\n"
+        f"You are the SQL generation engine for {company_name}.\n"
+        f"Schema blueprint:\n{schema_blueprint}\n\n"
         "Rules:\n"
-        "1. Query must be SELECT/WITH only. Never generate INSERT/UPDATE/DELETE/DDL.\n"
-        "2. Use exactly the table and column names provided in the blueprint.\n"
-        "3. If a table name includes schema prefix (e.g., 'schema.table'), use the full name.\n"
-        f"4. Add deterministic ORDER BY when returning lists.\n"
-        f"5. By default use LIMIT {row_limit} unless the SQL already has a stricter limit.\n"
-        f"6. If user asks for full/all/whole data, do not leave it unbounded: cap with LIMIT {SQL_FULL_ROW_LIMIT}.\n"
-        "7. If the request is ambiguous or missing key filters, ask a clarification question.\n\n"
-        "Return STRICT JSON only with keys:\n"
-        "{\"sql\": string|null, \"clarification_question\": string|null}"
+        "- Output ONLY raw SQL, no markdown, no backticks, no explanation.\n"
+        "- Always use ILIKE for name/text searches, never exact match.\n"
+        "- Always alias tables (example: t for tasks, u for users).\n"
+        "- Never use SELECT *; always name columns explicitly.\n"
+        f"- {limit_instruction}\n"
+        "- Use FK relationships from blueprint for JOINs.\n"
+        "- For date queries use CURRENT_DATE.\n"
+        "- Only generate SELECT statements, never INSERT/UPDATE/DELETE/DROP."
     )
-    
-    raw_output = await _call_mistral([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question}
-    ], max_tokens=500, model=SQL_GENERATION_MODEL)
-
-    payload = _extract_json_dict(raw_output)
-    if payload is not None:
-        clarification_question = payload.get("clarification_question")
-        if isinstance(clarification_question, str) and clarification_question.strip():
-            raise NeedsClarificationError(clarification_question.strip())
-        sql_value = payload.get("sql")
-        cleaned = sql_value.strip() if isinstance(sql_value, str) else ""
-    else:
-        cleaned = _strip_code_fences(raw_output)
-
-    return cleaned
-
-
-async def repair_sql_query(
-    company_name: str,
-    schema_blueprint: str,
-    question: str,
-    failed_sql: str,
-    db_error: str,
-) -> str:
-    prompt = (
-        f"You are fixing a failed SQL query for {company_name}.\n"
-        f"Database schema:\n{schema_blueprint}\n\n"
+    user_prompt = (
         f"User question:\n{question}\n\n"
-        f"Failed SQL:\n{failed_sql}\n\n"
-        f"Database error:\n{db_error}\n\n"
-        "Return STRICT JSON only with keys:\n"
-        "{\"sql\": string, \"clarification_question\": string|null}\n"
-        "Rules:\n"
-        "- SELECT/WITH only.\n"
-        "- Keep semantics of user question.\n"
-        "- Fix table/column names and joins based on schema.\n"
-        f"- Include LIMIT <= {SQL_FULL_ROW_LIMIT}."
+        f"Extracted entities (JSON):\n{json.dumps(entities, ensure_ascii=True)}"
     )
-    raw = await _call_mistral(
-        [{"role": "user", "content": prompt}],
-        max_tokens=500,
-        model=SQL_GENERATION_MODEL,
+
+    raw_sql = await _call_openai_sql(system_prompt, user_prompt)
+    return _strip_code_fences(raw_sql)
+
+
+async def fix_sql(sql: str, error: str, schema_blueprint: str) -> str:
+    system_prompt = (
+        "You fix malformed PostgreSQL SELECT queries.\n"
+        f"Schema blueprint:\n{schema_blueprint}\n\n"
+        "Return ONLY corrected raw SQL query. No markdown, no explanation.\n"
+        "Only SELECT statements are allowed."
     )
-    payload = _extract_json_dict(raw)
-    if payload is not None:
-        clarification_question = payload.get("clarification_question")
-        if isinstance(clarification_question, str) and clarification_question.strip():
-            raise NeedsClarificationError(clarification_question.strip())
-        sql_value = payload.get("sql")
-        return sql_value.strip() if isinstance(sql_value, str) else ""
-    return _strip_code_fences(raw)
+    user_prompt = f"Broken SQL:\n{sql}\n\nPostgreSQL error:\n{error}"
+
+    fixed_sql = await _call_openai_sql(system_prompt, user_prompt)
+    return _strip_code_fences(fixed_sql)
 
 
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
     rows_json = json.dumps(sql_results, ensure_ascii=True, default=str)
-    
+
     system_prompt = (
         f"You are the customer facing agent for {company_name}.\n"
         f"The user asked: '{question}'.\n"
         f"The database returned: {rows_json}\n\n"
         "Your task:\n"
-        "- Use ONLY these rows as source of truth.\n"
-        "- Do NOT invent dates, names, counts, or fields not present in rows.\n"
-        "- If rows are list-like, present key rows in concise bullets.\n"
-        "- If data is insufficient, say exactly what is missing.\n"
+        "- Read the database rows and directly answer the user's question.\n"
+        "- Do not invent data not present in rows.\n"
         "- Be friendly, natural, and concise.\n"
         "- Reply in exactly the same language the user wrote in."
     )
-    
-    reply = await _call_mistral([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Please answer my question using the data provided."}
-    ], max_tokens=600, model=RESPONSE_FORMAT_MODEL)
+
+    reply = await _call_mistral(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "Please answer my question using the data provided."},
+        ],
+        max_tokens=600,
+        model=RESPONSE_FORMAT_MODEL,
+    )
     return reply
 
 
 def _validate_generated_sql(sql: str) -> str:
-    cleaned = sql.strip()
+    cleaned = sql.strip().rstrip(";").strip()
     if not cleaned:
         raise ValueError("Generated SQL is empty.")
 
-    # Permit a trailing semicolon only; block multi-statement queries.
-    if cleaned.endswith(";"):
-        cleaned = cleaned[:-1].strip()
-    if ";" in cleaned:
-        raise ValueError("Generated SQL contains multiple statements.")
-
     lowered = cleaned.lower()
-    if not (lowered.startswith("select ") or lowered.startswith("with ")):
-        raise ValueError("Generated SQL is not read-only.")
+    if not lowered.startswith("select"):
+        raise ValueError("Generated SQL is not a SELECT statement.")
 
     blocked_patterns = (
         r"\binsert\b",
         r"\bupdate\b",
         r"\bdelete\b",
         r"\bdrop\b",
-        r"\balter\b",
         r"\btruncate\b",
+        r"\balter\b",
         r"\bcreate\b",
         r"\bgrant\b",
         r"\brevoke\b",
-        r"\bcopy\b",
-        r"\bexecute\b",
-        r"\bcall\b",
-        r"\bdo\b",
     )
     if any(re.search(pattern, lowered) for pattern in blocked_patterns):
         raise ValueError("Generated SQL includes disallowed operations.")
 
+    if re.search(r"\bselect\s+\*", lowered):
+        raise ValueError("Generated SQL uses SELECT * which is not allowed.")
+
     return cleaned
-
-
-def _format_rows_fallback(rows: list[dict[str, Any]], max_rows: int = 20) -> str:
-    if not rows:
-        return "I couldn't find any data matching your request."
-
-    preview = rows[:max_rows]
-    lines = [f"I found {len(rows)} record(s)."]
-    for index, row in enumerate(preview, start=1):
-        parts = [f"{key}: {value}" for key, value in row.items()]
-        lines.append(f"{index}. " + " | ".join(parts))
-    if len(rows) > max_rows:
-        lines.append(f"...and {len(rows) - max_rows} more record(s).")
-    return "\n".join(lines)
 
 
 async def handle_message(msg: BotMessage) -> None:
     try:
-        # Magic Link Onboarding Hooks
         text_upper = msg.text.strip().upper()
         text_normalized = msg.text.strip().lower()
+
         token = None
-        if msg.platform == "telegram" and text_upper.startswith("/START ") and len(msg.text.split()) > 1:
+        if msg.platform == Platform.TELEGRAM and text_upper.startswith("/START ") and len(msg.text.split()) > 1:
             token = msg.text.strip().split(" ", 1)[1]
-        elif msg.platform == "whatsapp" and text_upper.startswith("START-"):
+        elif msg.platform == Platform.WHATSAPP and text_upper.startswith("START-"):
             token = msg.text.strip().split("-", 1)[1]
-        
+
         if token:
             try:
                 import jwt
                 from .database import update_tenant_chat_id
+
                 secret = os.getenv("ADMIN_SECRET_TOKEN", "")
                 payload = jwt.decode(token, secret, algorithms=["HS256"])
                 tenant_id = payload.get("tenant_id")
@@ -272,7 +252,7 @@ async def handle_message(msg: BotMessage) -> None:
                     await send_reply(msg, "Welcome to Botivate! Your account is officially linked. How can I assist you today?")
                     return
             except Exception as e:
-                logger.error(f"Failed to process magic link token: {e}")
+                logger.error("Failed to process magic link token: %s", e)
                 await send_reply(msg, "Sorry, your onboarding link is invalid or expired. Please request a new link.")
                 return
 
@@ -293,70 +273,42 @@ async def handle_message(msg: BotMessage) -> None:
             return
 
         if credentials.db_type.lower() == "postgresql":
-            # 1. Ask LLM to generate SQL based on Blueprint
             blueprint = credentials.schema_blueprint or "No schema available."
-            try:
-                sql_query = await generate_sql_query(tenant.company_name, blueprint, msg.text)
-                if not sql_query:
-                    await send_reply(msg, "Could you clarify your request with more detail?")
-                    return
-                sql_query = _validate_generated_sql(sql_query)
-            except NeedsClarificationError as e:
-                await send_reply(msg, str(e))
-                return
-            except Exception as e:
-                logger.error(f"LLM SQL generation failed: {e}")
-                await send_reply(msg, GENERIC_FAILURE_MESSAGE)
-                return
-            
-            logger.info(f"Generated SQL for tenant {tenant.id}: {sql_query}")
-            
-            # 2. Run SQL query
-            try:
-                query_rows = await execute_tenant_query(tenant.id, sql_query)
-            except QueryExecutionError as e:
-                logger.error("Tenant query failed (first attempt): %s", e)
+
+            # ── SQL GENERATION (GPT-4o mini) ──
+            sql_query = await generate_sql_query(tenant.company_name, blueprint, msg.text)
+            sql_query = _validate_generated_sql(sql_query)
+            logger.info("Generated SQL for tenant %s: %s", tenant.id, sql_query)
+
+            max_retries = 2
+            attempt = 0
+            while True:
                 try:
-                    repaired_sql = await repair_sql_query(
-                        tenant.company_name,
-                        blueprint,
-                        msg.text,
-                        failed_sql=sql_query,
-                        db_error=str(e),
-                    )
-                    if not repaired_sql:
-                        await send_reply(msg, GENERIC_FAILURE_MESSAGE)
+                    query_rows = await execute_tenant_query(tenant.id, sql_query)
+                    break
+                except (QueryExecutionError, SecurityError) as exec_error:
+                    if attempt >= max_retries:
+                        await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
                         return
-                    repaired_sql = _validate_generated_sql(repaired_sql)
-                    logger.info("Repaired SQL for tenant %s: %s", tenant.id, repaired_sql)
-                    query_rows = await execute_tenant_query(tenant.id, repaired_sql)
-                except NeedsClarificationError as repair_clarification:
-                    await send_reply(msg, str(repair_clarification))
-                    return
-                except Exception as repair_error:
-                    logger.error("Tenant query failed after SQL repair: %s", repair_error)
-                    await send_reply(msg, GENERIC_FAILURE_MESSAGE)
-                    return
-                
-            # 3. Ask LLM to format the output
+                    attempt += 1
+                    logger.warning("SQL execution failed for tenant %s (attempt %s): %s", tenant.id, attempt, exec_error)
+                    sql_query = await fix_sql(sql_query, str(exec_error), blueprint)
+                    sql_query = _validate_generated_sql(sql_query)
+                    logger.info("Fixed SQL for tenant %s: %s", tenant.id, sql_query)
+
             if not query_rows:
                 await send_reply(msg, "I couldn't find any data matching your request.")
                 return
-            
-            try:
-                reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
-                if not reply.strip():
-                    raise ValueError("Empty formatted reply.")
-            except Exception as e:
-                logger.error(f"LLM response formatting failed: {e}")
-                await send_reply(msg, _format_rows_fallback(query_rows))
-                return
-            await send_reply(msg, reply)
-            
-        elif credentials.db_type.lower() == "google_sheets":
-            # Decrypt sheet ID and service account credentials
-            from .database import _decrypt_credential_value, fetch_google_sheet_data
+
+            # ── REPLY FORMATTING (Mistral) ──
+            reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
+            await send_reply(msg, reply or "I couldn't generate a response from the returned records.")
+            return
+
+        if credentials.db_type.lower() == "google_sheets":
             from cryptography.fernet import InvalidToken
+            from .database import _decrypt_credential_value, fetch_google_sheet_data
+
             try:
                 decrypted_url = _decrypt_credential_value(credentials.connection_url)
                 sheet_id = decrypted_url.replace("google_sheets://", "")
@@ -372,11 +324,10 @@ async def handle_message(msg: BotMessage) -> None:
             try:
                 blueprint, data_snapshot = fetch_google_sheet_data(sheet_id, creds_json)
             except Exception as e:
-                logger.error(f"Google Sheets fetch failed: {e}")
+                logger.error("Google Sheets fetch failed: %s", e)
                 await send_reply(msg, "I couldn't access your Google Sheet right now. Please try again.")
                 return
 
-            # Use LLM to answer directly from the snapshot data
             system_prompt = (
                 f"You are the customer assistant for {tenant.company_name}.\n"
                 f"Database Schema: {blueprint}\n\n"
@@ -386,18 +337,24 @@ async def handle_message(msg: BotMessage) -> None:
                 "- Be concise and friendly.\n"
                 "- Reply in exactly the same language the user wrote in."
             )
-            reply = await _call_mistral([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": msg.text}
-            ], max_tokens=500, model=RESPONSE_FORMAT_MODEL)
+            reply = await _call_mistral(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": msg.text},
+                ],
+                max_tokens=500,
+                model=RESPONSE_FORMAT_MODEL,
+            )
             await send_reply(msg, reply or "I couldn't generate a response.")
+            return
 
-            
-    except Exception as e:
+        await send_reply(msg, "Unsupported tenant data source configuration.")
+    except Exception:
         logger.exception("Failed to process customer message for chat_id %s", msg.chat_id)
         try:
-            await send_reply(msg, GENERIC_FAILURE_MESSAGE)
+            await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
         except Exception:
             pass
 
-__all__ = ["handle_message"]
+
+__all__ = ["handle_message", "fix_sql", "generate_sql_query"]

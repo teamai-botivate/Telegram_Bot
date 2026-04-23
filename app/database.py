@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 import socket
 import uuid
 from datetime import datetime, timezone
@@ -22,6 +24,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 FERNET_SECRET_KEY = os.getenv("FERNET_SECRET_KEY", "")
 TENANT_DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("TENANT_DB_CONNECT_TIMEOUT_SECONDS", "20"))
 TENANT_DB_CONNECT_RETRIES = int(os.getenv("TENANT_DB_CONNECT_RETRIES", "1"))
+logger = logging.getLogger(__name__)
 
 
 class TenantDBConnectionError(Exception):
@@ -30,6 +33,10 @@ class TenantDBConnectionError(Exception):
 
 class QueryExecutionError(Exception):
 	"""Raised when query execution against tenant DB fails."""
+
+
+class SecurityError(Exception):
+	"""Raised when a query violates security rules."""
 
 
 _fernet: Fernet | None = None
@@ -86,6 +93,30 @@ def _describe_connection_exception(exc: Exception) -> str:
 	if message:
 		return message
 	return f"{type(exc).__name__} (no error details provided)"
+
+
+def _quote_ident(identifier: str) -> str:
+	return '"' + identifier.replace('"', '""') + '"'
+
+
+def _sanitize_select_sql(sql: str) -> str:
+	cleaned = sql.strip().rstrip(";").strip()
+	if not cleaned:
+		raise SecurityError("Query is empty.")
+
+	if ";" in cleaned:
+		raise SecurityError("Multiple statements are not allowed.")
+
+	lowered = cleaned.lower()
+	if not lowered.startswith("select"):
+		raise SecurityError("Only SELECT statements are allowed.")
+
+	blocked_keywords = ("insert", "update", "delete", "drop", "truncate", "alter", "create", "grant", "revoke")
+	for keyword in blocked_keywords:
+		if re.search(rf"\b{keyword}\b", lowered):
+			raise SecurityError(f"Disallowed keyword detected: {keyword.upper()}")
+
+	return cleaned
 
 META_SQLALCHEMY_DATABASE_URL = _convert_to_sqlalchemy_asyncpg_url(DATABASE_URL) if DATABASE_URL else ""
 
@@ -274,16 +305,29 @@ async def execute_tenant_query(tenant_id: uuid.UUID | str, sql: str, *params: An
 	connection = await decrypt_and_connect(tenant_id)
 
 	try:
-		rows = await connection.fetch(sql, *params)
+		safe_sql = _sanitize_select_sql(sql)
+		logger.info(
+			"Tenant query attempt tenant_id=%s timestamp=%s sql=%s",
+			tenant_id,
+			datetime.now(timezone.utc).isoformat(),
+			safe_sql,
+		)
+
+		try:
+			await connection.fetch(f"EXPLAIN {safe_sql}", *params)
+		except asyncpg.PostgresError as e:
+			raise QueryExecutionError(f"EXPLAIN failed: {e}")
+
+		rows = await connection.fetch(safe_sql, *params)
 		return [dict(row) for row in rows]
+	except QueryExecutionError:
+		raise
+	except SecurityError:
+		raise
 	except asyncpg.PostgresError as e:
-		import logging
-		logger = logging.getLogger(__name__)
 		logger.error(f"PostgresError executing tenant query. SQL: {sql} | Error: {e}")
 		raise QueryExecutionError(f"Failed to execute query: {e}")
 	except Exception as e:
-		import logging
-		logger = logging.getLogger(__name__)
 		logger.error(f"Unexpected error executing tenant query: {e}")
 		raise QueryExecutionError("An unexpected error occurred while running tenant query.")
 	finally:
@@ -352,15 +396,36 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 		enum_rows = await connection.fetch(enum_sql)
 		enums = {row["enum_name"]: row["enum_values"] for row in enum_rows}
 
-		sql = """
+		column_sql = """
 		SELECT table_schema, table_name, column_name, data_type, udt_name
 		FROM information_schema.columns
 		WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
 		ORDER BY table_schema, table_name, ordinal_position;
 		"""
-		rows = await connection.fetch(sql)
+		rows = await connection.fetch(column_sql)
 
-		tables: dict[str, list[str]] = {}
+		fk_sql = """
+		SELECT
+			tc.table_schema,
+			tc.table_name,
+			kcu.column_name,
+			ccu.table_schema AS foreign_table_schema,
+			ccu.table_name AS foreign_table_name,
+			ccu.column_name AS foreign_column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		JOIN information_schema.constraint_column_usage ccu
+			ON ccu.constraint_name = tc.constraint_name
+			AND ccu.table_schema = tc.table_schema
+		WHERE tc.constraint_type = 'FOREIGN KEY'
+			AND tc.table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
+		ORDER BY tc.table_schema, tc.table_name, kcu.column_name;
+		"""
+		fk_rows = await connection.fetch(fk_sql)
+
+		tables: dict[str, dict[str, Any]] = {}
 		for row in rows:
 			schema = row["table_schema"]
 			table = row["table_name"]
@@ -372,11 +437,67 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 				data_type = f"enum({', '.join(enums[udt_name])})"
 
 			full_name = f"{schema}.{table}" if schema != "public" else table
-			tables.setdefault(full_name, []).append(f"{column} ({data_type})")
+			if full_name not in tables:
+				tables[full_name] = {
+					"schema": schema,
+					"table": table,
+					"columns": [],
+					"text_columns": [],
+					"fks": [],
+				}
+			tables[full_name]["columns"].append(f"{column} ({data_type})")
+			if data_type.lower() in {"text", "character varying", "character", "varchar"}:
+				tables[full_name]["text_columns"].append(column)
+
+		for fk in fk_rows:
+			src_schema = fk["table_schema"]
+			src_table = fk["table_name"]
+			src_col = fk["column_name"]
+			dst_schema = fk["foreign_table_schema"]
+			dst_table = fk["foreign_table_name"]
+			dst_col = fk["foreign_column_name"]
+
+			src_full = f"{src_schema}.{src_table}" if src_schema != "public" else src_table
+			dst_full = f"{dst_schema}.{dst_table}" if dst_schema != "public" else dst_table
+			if src_full in tables:
+				tables[src_full]["fks"].append(f"FK: {src_full}.{src_col} -> {dst_full}.{dst_col}")
 
 		blueprint = "Database Blueprint (PostgreSQL):\n"
-		for table_name, cols in tables.items():
-			blueprint += f"Table `{table_name}` | Columns: {', '.join(cols)}\n"
+		for table_name, info in tables.items():
+			schema = info["schema"]
+			table = info["table"]
+			quoted_schema = _quote_ident(schema)
+			quoted_table = _quote_ident(table)
+
+			row_count_str = "unknown"
+			try:
+				count_row = await connection.fetchrow(f"SELECT COUNT(*)::bigint AS cnt FROM {quoted_schema}.{quoted_table}")
+				if count_row is not None:
+					row_count_str = str(count_row["cnt"])
+			except Exception:
+				pass
+
+			blueprint += f"Table `{table_name}` | Rows: ~{row_count_str}\n"
+			blueprint += f"Columns: {', '.join(info['columns'])}\n"
+
+			for fk_line in info["fks"]:
+				blueprint += fk_line + "\n"
+
+			for text_col in info["text_columns"]:
+				try:
+					quoted_col = _quote_ident(text_col)
+					sample_rows = await connection.fetch(
+						f"SELECT DISTINCT {quoted_col} AS value FROM {quoted_schema}.{quoted_table} "
+						f"WHERE {quoted_col} IS NOT NULL LIMIT 5"
+					)
+					samples = [str(sample["value"]) for sample in sample_rows]
+					if samples:
+						blueprint += f"Sample `{text_col}`: {samples}\n"
+				except Exception:
+					# Best effort enrichment; skip sample extraction failures silently.
+					pass
+
+			blueprint += "\n"
 
 		return blueprint.strip()
 	except Exception as e:
@@ -384,6 +505,35 @@ async def fetch_postgres_schema(connection_string: str) -> str:
 	finally:
 		if connection is not None:
 			await connection.close()
+
+
+async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
+	if session_factory is None:
+		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
+
+	tenant_uuid = uuid.UUID(str(tenant_id))
+	async with session_factory() as session:
+		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
+		result = await session.execute(statement)
+		credential = result.scalar_one_or_none()
+		if credential is None:
+			raise ValueError("Tenant credentials not found.")
+		if credential.db_type.lower() != "postgresql":
+			raise ValueError("Schema refresh is supported only for PostgreSQL tenants.")
+		connection_url = _decrypt_credential_value(credential.connection_url)
+
+	blueprint = await fetch_postgres_schema(connection_url)
+
+	async with session_factory() as session:
+		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
+		result = await session.execute(statement)
+		credential = result.scalar_one_or_none()
+		if credential is None:
+			raise ValueError("Tenant credentials not found.")
+		credential.schema_blueprint = blueprint
+		await session.commit()
+
+	return blueprint
 
 
 def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:

@@ -58,3 +58,42 @@ async def test_decrypt_and_connect_timeout_has_actionable_error(monkeypatch) -> 
         await database.decrypt_and_connect("tenant-id")
 
     assert "timed out" in str(exc_info.value).lower()
+
+
+def test_sanitize_select_sql_rejects_non_select() -> None:
+    with pytest.raises(database.SecurityError):
+        database._sanitize_select_sql("DELETE FROM users")
+
+
+@pytest.mark.asyncio
+async def test_execute_tenant_query_runs_explain_before_execution(monkeypatch) -> None:
+    connection = SimpleNamespace(
+        fetch=AsyncMock(side_effect=[[{"QUERY PLAN": "Seq Scan"}], [{"id": 1, "name": "Alice"}]]),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(database, "decrypt_and_connect", AsyncMock(return_value=connection))
+
+    rows = await database.execute_tenant_query("tenant-id", "SELECT id, name FROM users LIMIT 10")
+
+    assert rows == [{"id": 1, "name": "Alice"}]
+    assert connection.fetch.await_count == 2
+    first_call_sql = connection.fetch.await_args_list[0].args[0]
+    assert first_call_sql.startswith("EXPLAIN ")
+    connection.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_tenant_query_raises_query_error_when_explain_fails(monkeypatch) -> None:
+    class FakePgError(database.asyncpg.PostgresError):
+        pass
+
+    connection = SimpleNamespace(
+        fetch=AsyncMock(side_effect=FakePgError("syntax error at or near FROM")),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(database, "decrypt_and_connect", AsyncMock(return_value=connection))
+
+    with pytest.raises(database.QueryExecutionError) as exc_info:
+        await database.execute_tenant_query("tenant-id", "SELECT id name FROM users")
+
+    assert "EXPLAIN failed" in str(exc_info.value)

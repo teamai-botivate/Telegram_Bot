@@ -13,6 +13,7 @@ from .database import (
     create_tenant_record,
     fetch_google_sheet_data,
     fetch_postgres_schema,
+    refresh_schema_blueprint,
     save_tenant_credentials,
 )
 
@@ -193,3 +194,22 @@ async def generate_magic_link(
     }
     encoded_jwt = jwt.encode(payload_data, ADMIN_SECRET_TOKEN, algorithm="HS256")
     return {"token": encoded_jwt}
+
+
+@router.post("/{tenant_id}/refresh-schema")
+async def refresh_tenant_schema(
+    tenant_id: str,
+    _: None = Depends(verify_admin_token),
+) -> dict[str, Any]:
+    try:
+        blueprint = await refresh_schema_blueprint(tenant_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to refresh schema blueprint: {e}")
+
+    return {
+        "status": "refreshed",
+        "tenant_id": tenant_id,
+        "schema_blueprint_preview": blueprint[:500],
+    }

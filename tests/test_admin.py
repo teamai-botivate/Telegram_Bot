@@ -158,3 +158,20 @@ async def test_create_full_google_sheets_success(monkeypatch) -> None:
     assert call_kwargs["connection_url"] == "google_sheets://test_sheet_id"
     assert call_kwargs["google_credentials"] == '{"type": "service_account"}'
     assert call_kwargs["schema_blueprint"] == "Google Sheets Blueprint"
+
+
+@pytest.mark.asyncio
+async def test_refresh_schema_success(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
+    monkeypatch.setattr(admin, "refresh_schema_blueprint", AsyncMock(return_value="Blueprint content"))
+
+    response = client.post(
+        "/admin/tenant/test-tenant-id/refresh-schema",
+        headers={"x-admin-token": "secret"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "refreshed"
+    assert body["tenant_id"] == "test-tenant-id"
+    assert "Blueprint content" in body["schema_blueprint_preview"]

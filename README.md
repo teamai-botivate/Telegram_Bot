@@ -55,11 +55,15 @@ These endpoints are protected by header x-admin-token with ADMIN_SECRET_TOKEN va
 	- Stores tenant-specific SQL template by module + intent
 	- Upserts TenantSchemaMap
 
+- POST /admin/tenant/{tenant_id}/refresh-schema
+	- Re-runs PostgreSQL schema introspection
+	- Updates stored `schema_blueprint` for that tenant
+
 ## Render Deployment
 
 1. Create a new Web Service in Render and connect this repository.
 2. Set these environment variables in the Render dashboard:
-	DATABASE_URL, FERNET_SECRET_KEY, ADMIN_SECRET_TOKEN, TELEGRAM_BOT_TOKEN, MISTRAL_API_KEY, SQL_GENERATION_MODEL, RESPONSE_FORMAT_MODEL, SQL_DEFAULT_ROW_LIMIT, SQL_FULL_ROW_LIMIT
+	DATABASE_URL, FERNET_SECRET_KEY, ADMIN_SECRET_TOKEN, TELEGRAM_BOT_TOKEN, MISTRAL_API_KEY, OPENAI_API_KEY, SQL_GENERATION_MODEL, RESPONSE_FORMAT_MODEL, SQL_DEFAULT_ROW_LIMIT, SQL_FULL_ROW_LIMIT
 
 	When ready to enable WhatsApp, also set:
 	WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_BUSINESS_ACCOUNT_ID, WEBHOOK_VERIFY_TOKEN
@@ -106,6 +110,16 @@ https://<your-render-service>.onrender.com/webhook/telegram
 
 Open app/bot_logic.py and find the comment # SWITCH_TO_CLAUDE.
 Replace only the API call block at that marker (request URL, headers, and payload/response parsing) to switch providers while keeping the rest of the message flow unchanged.
+
+## SQL Generation Pipeline
+
+- SQL generation uses GPT (`SQL_GENERATION_MODEL`, default `gpt-4.1`) via OpenAI SDK.
+- Reply formatting uses Mistral small (`mistral-small-latest`).
+- Tenant-specific schema blueprint is stored in `tenant_db_credentials.schema_blueprint`.
+- Schema blueprint can be refreshed on demand with:
+	- `POST /admin/tenant/{tenant_id}/refresh-schema`
+- SQL execution includes self-healing retry logic:
+	- On malformed SQL / PostgreSQL errors, the bot calls `fix_sql()` and retries automatically (up to 2 retries).
 
 ## Project Structure
 

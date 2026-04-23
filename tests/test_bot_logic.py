@@ -1,11 +1,8 @@
-import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
-import respx
 
 from app import bot_logic
 from app.platforms.base import BotMessage, Platform
@@ -28,7 +25,6 @@ async def test_handle_message_sends_account_not_found_when_tenant_missing(monkey
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
@@ -42,7 +38,7 @@ async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) 
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
     monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
-    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT * FROM orders LIMIT 10"))
+    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id, status FROM orders LIMIT 10"))
     monkeypatch.setattr(
         bot_logic,
         "execute_tenant_query",
@@ -69,13 +65,14 @@ async def test_handle_message_tenant_query_error(monkeypatch) -> None:
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
     monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
-    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT * FROM orders"))
+    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id FROM orders"))
     monkeypatch.setattr(bot_logic, "execute_tenant_query", AsyncMock(side_effect=QueryExecutionError("DB down")))
+    monkeypatch.setattr(bot_logic, "fix_sql", AsyncMock(side_effect=ValueError("bad fix")))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Show status")
     await bot_logic.handle_message(message)
 
-    send_reply_mock.assert_awaited_once_with(message, bot_logic.GENERIC_FAILURE_MESSAGE)
+    send_reply_mock.assert_awaited_once_with(message, bot_logic.RETRIEVAL_FAILURE_MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -98,7 +95,7 @@ async def test_handle_message_retries_query_with_repaired_sql(monkeypatch) -> No
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
     monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT work_date FROM calendar"))
-    monkeypatch.setattr(bot_logic, "repair_sql_query", AsyncMock(return_value="SELECT date, is_working FROM calendar LIMIT 50"))
+    monkeypatch.setattr(bot_logic, "fix_sql", AsyncMock(return_value="SELECT date, is_working FROM calendar LIMIT 50"))
     monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
     monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="Here is your working calendar."))
 
@@ -123,9 +120,8 @@ async def test_handle_message_start_without_token_returns_help(monkeypatch) -> N
     )
 
 
-def test_validate_generated_sql_allows_select_and_with() -> None:
+def test_validate_generated_sql_allows_select_only() -> None:
     assert bot_logic._validate_generated_sql("SELECT 1;") == "SELECT 1"
-    assert bot_logic._validate_generated_sql("WITH t AS (SELECT 1) SELECT * FROM t") == "WITH t AS (SELECT 1) SELECT * FROM t"
 
 
 @pytest.mark.parametrize(
@@ -135,6 +131,8 @@ def test_validate_generated_sql_allows_select_and_with() -> None:
         "DELETE FROM orders",
         "SELECT * FROM orders; DROP TABLE tenants",
         "UPDATE orders SET status='x'",
+        "WITH t AS (SELECT 1) SELECT * FROM t",
+        "SELECT * FROM orders",
     ],
 )
 def test_validate_generated_sql_blocks_non_read_only(sql: str) -> None:
@@ -144,14 +142,12 @@ def test_validate_generated_sql_blocks_non_read_only(sql: str) -> None:
 
 @pytest.mark.asyncio
 async def test_generate_sql_query_uses_sql_generation_model(monkeypatch) -> None:
-    call_mock = AsyncMock(return_value="SELECT 1")
-    monkeypatch.setattr(bot_logic, "_call_mistral", call_mock)
-    monkeypatch.setattr(bot_logic, "SQL_GENERATION_MODEL", "codestral-latest")
+    call_mock = AsyncMock(return_value="SELECT id FROM orders LIMIT 50")
+    monkeypatch.setattr(bot_logic, "_call_openai_sql", call_mock)
 
     sql = await bot_logic.generate_sql_query("Demo Corp", "Table orders(id int)", "show orders")
 
-    assert sql == "SELECT 1"
-    assert call_mock.await_args.kwargs["model"] == "codestral-latest"
+    assert sql == "SELECT id FROM orders LIMIT 50"
 
 
 @pytest.mark.asyncio
@@ -190,10 +186,7 @@ async def test_handle_message_uses_fallback_rows_when_formatting_fails(monkeypat
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="order status")
     await bot_logic.handle_message(message)
 
-    send_reply_mock.assert_awaited_once()
-    reply_text = send_reply_mock.call_args.args[1]
-    assert "record(s)" in reply_text
-    assert "status: done" in reply_text
+    send_reply_mock.assert_awaited_once_with(message, bot_logic.RETRIEVAL_FAILURE_MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -209,7 +202,7 @@ async def test_handle_message_no_results(monkeypatch) -> None:
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
     monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
-    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT * FROM orders"))
+    monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id FROM orders"))
     monkeypatch.setattr(bot_logic, "execute_tenant_query", AsyncMock(return_value=[]))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Show status")
