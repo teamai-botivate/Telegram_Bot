@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -17,6 +18,7 @@ from .database import create_tables
 from .webhook import router as webhook_router
 
 logger = logging.getLogger(__name__)
+STARTUP_DB_INIT_TIMEOUT_SECONDS = float(os.getenv("STARTUP_DB_INIT_TIMEOUT_SECONDS", "15"))
 
 app = FastAPI(title="botivate-bot")
 
@@ -38,10 +40,21 @@ if os.path.exists(static_dir):
 
 @app.on_event("startup")
 async def startup() -> None:
-	try:
-		await create_tables()
-	except Exception:
-		logger.exception("Failed to create database tables on startup.")
+    async def _initialize_db_metadata() -> None:
+        timeout_seconds = max(1.0, STARTUP_DB_INIT_TIMEOUT_SECONDS)
+        try:
+            await asyncio.wait_for(create_tables(), timeout=timeout_seconds)
+            logger.info("Database table check completed during startup.")
+        except TimeoutError:
+            logger.warning(
+                "Database table check timed out after %.1fs; continuing startup to serve health checks.",
+                timeout_seconds,
+            )
+        except Exception:
+            logger.exception("Failed to create database tables on startup.")
+
+    # Do not block ASGI startup on database availability; Render health checks should pass quickly.
+    asyncio.create_task(_initialize_db_metadata())
 
 
 @app.get("/health")

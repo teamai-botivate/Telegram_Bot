@@ -175,6 +175,16 @@ def test_validate_generated_sql_allows_select_only() -> None:
     assert bot_logic._validate_generated_sql("SELECT 1;") == "SELECT 1"
 
 
+def test_format_reply_for_chat_removes_markdown_noise() -> None:
+    raw = """**Summary**\n\n* item one\n• item two\n`code`\n"""
+    formatted = bot_logic._format_reply_for_chat(raw)
+
+    assert "**" not in formatted
+    assert "`" not in formatted
+    assert "- item one" in formatted
+    assert "- item two" in formatted
+
+
 @pytest.mark.parametrize(
     "sql",
     [
@@ -191,6 +201,39 @@ def test_validate_generated_sql_blocks_non_read_only(sql: str) -> None:
         bot_logic._validate_generated_sql(sql)
 
 
+def test_expand_generic_count_query_across_matching_tables() -> None:
+    schema_blueprint = (
+        "Table `checklist`\n"
+        "Columns: task_id (int), given_by (text), task_description (text)\n\n"
+        "Table `delegation`\n"
+        "Columns: task_id (int), given_by (text), name (text)\n"
+    )
+    sql = "SELECT COUNT(*) FROM checklist AS c WHERE c.given_by ILIKE '%admin%'"
+    question = "How many tasks are assigned by Admin?"
+
+    expanded = bot_logic._maybe_expand_count_query_across_tables(sql, schema_blueprint, question)
+
+    assert "UNION ALL" in expanded
+    assert "FROM checklist AS t1" in expanded
+    assert "FROM delegation AS t2" in expanded
+    assert expanded.startswith("SELECT COUNT(*) AS total_count")
+
+
+def test_does_not_expand_count_when_question_mentions_specific_table() -> None:
+    schema_blueprint = (
+        "Table `checklist`\n"
+        "Columns: task_id (int), given_by (text), task_description (text)\n\n"
+        "Table `delegation`\n"
+        "Columns: task_id (int), given_by (text), name (text)\n"
+    )
+    sql = "SELECT COUNT(*) FROM checklist AS c WHERE c.given_by ILIKE '%admin%'"
+    question = "How many tasks in checklist are assigned by Admin?"
+
+    expanded = bot_logic._maybe_expand_count_query_across_tables(sql, schema_blueprint, question)
+
+    assert expanded == sql
+
+
 @pytest.mark.asyncio
 async def test_generate_sql_query_uses_sql_generation_model(monkeypatch) -> None:
     call_mock = AsyncMock(return_value="SELECT id FROM orders LIMIT 50")
@@ -199,6 +242,44 @@ async def test_generate_sql_query_uses_sql_generation_model(monkeypatch) -> None
     sql = await bot_logic.generate_sql_query("Demo Corp", "Table orders(id int)", "show orders")
 
     assert sql == "SELECT id FROM orders LIMIT 50"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_expands_generic_count_query_across_tables(monkeypatch) -> None:
+    tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
+    credentials = SimpleNamespace(
+        db_type="postgresql",
+        connection_url="encrypted_url",
+        schema_blueprint=(
+            "Table `checklist`\n"
+            "Columns: task_id (int), given_by (text), task_description (text)\n\n"
+            "Table `delegation`\n"
+            "Columns: task_id (int), given_by (text), name (text)\n"
+        ),
+    )
+    send_reply_mock = AsyncMock()
+    execute_mock = AsyncMock(return_value=[{"total_count": 1}])
+
+    monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
+    monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(
+        bot_logic,
+        "generate_sql_query",
+        AsyncMock(return_value="SELECT COUNT(*) FROM checklist AS c WHERE c.given_by ILIKE '%admin%'"),
+    )
+    monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
+    monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="There is 1 task assigned by Admin."))
+
+    message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="How many tasks are assigned by Admin?")
+    await bot_logic.handle_message(message)
+
+    executed_sql = execute_mock.await_args.args[1]
+    assert "UNION ALL" in executed_sql
+    assert "FROM checklist AS t1" in executed_sql
+    assert "FROM delegation AS t2" in executed_sql
+    send_reply_mock.assert_awaited_once_with(message, "There is 1 task assigned by Admin.")
 
 
 @pytest.mark.asyncio

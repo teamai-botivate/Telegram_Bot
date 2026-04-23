@@ -253,6 +253,79 @@ WHERE {alias}.{first_cols[0]} IS NOT NULL"""
     return "\n\n".join(examples) if examples else "No schema-derived examples available."
 
 
+def _question_mentions_schema_table(question: str, schema_blueprint: str) -> bool:
+    lowered_question = question.lower()
+    for table_name in _extract_table_names_from_blueprint(schema_blueprint):
+        lowered_table = table_name.lower()
+        if lowered_table in lowered_question:
+            return True
+
+        spaced_variant = lowered_table.replace("_", " ")
+        if spaced_variant in lowered_question:
+            return True
+
+    return False
+
+
+def _extract_tables_with_column(schema_blueprint: str, column_name: str) -> list[str]:
+    target = column_name.lower()
+    matches: list[str] = []
+
+    for table_name in _extract_table_names_from_blueprint(schema_blueprint):
+        columns = [column.lower() for column in _extract_columns_for_table(schema_blueprint, table_name)]
+        if target in columns:
+            matches.append(table_name)
+
+    return matches
+
+
+def _maybe_expand_count_query_across_tables(sql: str, schema_blueprint: str, question: str) -> str:
+    lowered_sql = sql.lower()
+    if "count(" not in lowered_sql or "union all" in lowered_sql or " join " in lowered_sql:
+        return sql
+
+    if not re.search(r"\bhow\s+many\b|\bcount\b", question, flags=re.IGNORECASE):
+        return sql
+
+    if _question_mentions_schema_table(question, schema_blueprint):
+        return sql
+
+    from_match = re.search(r"\bfrom\s+([a-zA-Z_][\w]*)\b", sql, flags=re.IGNORECASE)
+    where_match = re.search(
+        r"\bwhere\s+(?:[a-zA-Z_][\w]*\.)?([a-zA-Z_][\w]*)\s+ilike\s+('(?:''|[^'])*')",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not from_match or not where_match:
+        return sql
+
+    source_table = from_match.group(1)
+    filter_column = where_match.group(1)
+    filter_literal = where_match.group(2)
+
+    candidate_tables = _extract_tables_with_column(schema_blueprint, filter_column)
+    if len(candidate_tables) <= 1:
+        return sql
+
+    if source_table not in candidate_tables:
+        candidate_tables.insert(0, source_table)
+
+    subqueries: list[str] = []
+    for index, table_name in enumerate(candidate_tables, start=1):
+        alias = f"t{index}"
+        subqueries.append(
+            f"SELECT 1 AS row_marker FROM {table_name} AS {alias} "
+            f"WHERE {alias}.{filter_column} ILIKE {filter_literal}"
+        )
+
+    return (
+        "SELECT COUNT(*) AS total_count\n"
+        "FROM (\n"
+        + "\nUNION ALL\n".join(subqueries)
+        + "\n) AS combined_rows"
+    )
+
+
 async def generate_sql_query(
     company_name: str,
     schema_blueprint: str,
@@ -385,17 +458,58 @@ Corrected SQL:
     return _strip_code_fences(fixed_sql)
 
 
-async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
+def _format_reply_for_chat(raw_reply: str) -> str:
+    cleaned = _strip_code_fences(raw_reply)
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "")
+    cleaned = re.sub(r"^[ \t]*[•●▪◦*]\s+", "- ", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+
+    lines = [line.strip() for line in cleaned.splitlines()]
+    normalized: list[str] = []
+    previous_blank = False
+    for line in lines:
+        if not line:
+            if previous_blank:
+                continue
+            previous_blank = True
+            normalized.append("")
+            continue
+
+        previous_blank = False
+        normalized.append(line)
+
+    return "\n".join(normalized).strip()
+
+
+async def format_sql_response(
+    company_name: str,
+    question: str,
+    sql_results: list[dict[str, Any]],
+    platform: Platform | None = None,
+) -> str:
     rows_json = json.dumps(sql_results, ensure_ascii=True, default=str)
+
+    if platform == Platform.WHATSAPP:
+        platform_style = "WhatsApp"
+    elif platform == Platform.TELEGRAM:
+        platform_style = "Telegram"
+    else:
+        platform_style = "chat"
 
     system_prompt = (
         f"You are the customer facing agent for {company_name}.\n"
         f"The user asked: '{question}'.\n"
         f"The database returned: {rows_json}\n\n"
+        f"Channel: {platform_style}\n\n"
         "Your task:\n"
         "- Read the database rows and directly answer the user's question.\n"
         "- Do not invent data not present in rows.\n"
-        "- Be friendly, natural, and concise.\n"
+        "- Be friendly, natural, concise, and optimized for mobile chat reading.\n"
+        "- Plain text only (no markdown symbols like **, __, or backticks).\n"
+        "- First line must directly answer the question.\n"
+        "- Use short lines; if listing items, use '-' bullet points.\n"
+        "- Keep total reply under 10 lines when possible.\n"
         "- Reply in exactly the same language the user wrote in."
     )
 
@@ -407,7 +521,7 @@ async def format_sql_response(company_name: str, question: str, sql_results: lis
         max_tokens=600,
         model=RESPONSE_FORMAT_MODEL,
     )
-    return reply
+    return _format_reply_for_chat(reply)
 
 
 def _validate_generated_sql(sql: str) -> str:
@@ -462,6 +576,10 @@ async def handle_message(msg: BotMessage) -> None:
                     await update_tenant_chat_id(tenant_id, msg.platform, msg.chat_id)
                     await send_reply(msg, "Welcome to Botivate! Your account is officially linked. How can I assist you today?")
                     return
+            except ValueError as e:
+                logger.warning("Magic link token could not link chat id: %s", e)
+                await send_reply(msg, str(e))
+                return
             except Exception as e:
                 logger.error("Failed to process magic link token: %s", e)
                 await send_reply(msg, "Sorry, your onboarding link is invalid or expired. Please request a new link.")
@@ -530,6 +648,7 @@ async def handle_message(msg: BotMessage) -> None:
                     msg.text,
                     auto_schema_hints=getattr(credentials, "auto_schema_hints", None),
                 )
+                sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                 sql_query = _validate_generated_sql(sql_query)
                 logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
                 logger.info(f"[SQL_OUT] {sql_query}")
@@ -557,6 +676,7 @@ async def handle_message(msg: BotMessage) -> None:
                             return
                         attempt += 1
                         sql_query = await fix_sql(sql_query, final_error, blueprint)
+                        sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                         sql_query = _validate_generated_sql(sql_query)
                         logger.info(f"[SQL_OUT] {sql_query}")
 
@@ -565,7 +685,7 @@ async def handle_message(msg: BotMessage) -> None:
                 return
 
             # ── REPLY FORMATTING (Mistral) ──
-            reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
+            reply = await format_sql_response(tenant.company_name, msg.text, query_rows, platform=msg.platform)
             await send_reply(msg, reply or "I couldn't generate a response from the returned records.")
             return
 

@@ -11,7 +11,7 @@ from fastapi import Query as FastAPIQuery
 from pydantic import BaseModel, Field
 
 from .database import (
-    create_tenant_record,
+    create_or_attach_tenant_record,
     execute_tenant_query,
     fetch_google_sheet_data,
     fetch_postgres_schema,
@@ -169,7 +169,7 @@ async def create_full_tenant(
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported db_type.")
 
-    tenant_id = await create_tenant_record(payload.company_name, payload.active_modules)
+    tenant_id, attached_to_existing = await create_or_attach_tenant_record(payload.company_name, payload.active_modules)
 
     await save_tenant_credentials(
         tenant_id=tenant_id,
@@ -180,6 +180,13 @@ async def create_full_tenant(
         ssl_required=payload.ssl_required if payload.db_type.lower() == "postgresql" else False,
         google_credentials=google_credentials,
     )
+
+    if attached_to_existing:
+        return {
+            "status": "attached",
+            "tenant_id": str(tenant_id),
+            "message": "Existing company tenant reused and modules merged.",
+        }
 
     return {"status": "created", "tenant_id": str(tenant_id)}
 
