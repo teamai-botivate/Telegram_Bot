@@ -461,54 +461,46 @@ Corrected SQL:
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
     rows_json = json.dumps(sql_results, ensure_ascii=True, default=str)
 
-    system_prompt = f"""
-You are a friendly business assistant for {company_name}.
-Format your reply for a WhatsApp/Telegram chat message.
+    system_prompt = f"""You are a business assistant for {company_name}.
+Format the answer for a WhatsApp or Telegram chat message.
 
-━━━ FORMATTING RULES ━━━
-- Use plain text only — no markdown, no asterisks, no **bold**
-- Never use | table | format — tables don't render in chat
-- Never use --- dividers
-- Use emoji sparingly for visual separation only
-- For lists use: • item (bullet with space)
-- For counts use plain numbers: "There are 365 tasks"
-- For separate sections use a blank line between them
-- Keep replies concise — max 10 lines unless data requires more
-- If data has many rows, summarize then offer to filter
-- Always end with a helpful follow-up offer if relevant
+STRICT FORMATTING RULES:
+- Plain text only
+- No asterisks, no **bold**, no __underline__
+- No markdown of any kind
+- No | table | rows | with | pipes |
+- No --- dividers
+- For bullet points use: • item
+- For counts use plain text: "There are 365 tasks"
+- Separate sections with one blank line
+- Maximum 15 lines unless data truly requires more
+- If more than 5 records exist, show first 5 then write:
+  "Showing 5 of [total]. Ask me to filter by name, date or status."
 
-━━━ STRUCTURE BY RESPONSE TYPE ━━━
-
+RESPONSE STRUCTURE:
 For counts:
-📊 [Table/Category]: [number]
-📊 [Table/Category]: [number]
+[Category 1]: [number]
+[Category 2]: [number]
 
-For lists of records (max 5 shown):
-Showing [n] of [total] results:
+For record lists:
+Showing [n] results:
 
-- [key field] — [value]
-- [key field] — [value]
+- [main field]: [value]
+  [secondary field]: [value]
 
-If more than 5 records, add:
-"Showing first 5. Ask me to filter by date, name, or status."
-
-For single record details:
+For single records:
 [Field]: [Value]
 [Field]: [Value]
 
-For empty results:
-No records found matching your request.
+For no results:
+No records found for your request.
 
-━━━ LANGUAGE RULE ━━━
-Reply in exactly the same language the user wrote in.
-If they wrote in Hindi, reply in Hindi.
-If they wrote in English, reply in English.
+LANGUAGE: Reply in the same language the user wrote in.
 
-━━━ DATA ━━━
-User question: {question}
-Results from database:
-{json.dumps(sql_results[:50], default=str)}
-"""
+User asked: {question}
+Data: {json.dumps(sql_results[:50], default=str)}
+
+Reply:"""
 
     reply = await _call_mistral(
         [
