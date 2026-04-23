@@ -43,6 +43,25 @@ DATABASE_CONNECTION_MESSAGE = (
     "Please contact Botivate support if this persists."
 )
 
+def is_explanatory_question(text: str) -> bool:
+    lowered = text.lower().strip()
+    
+    # Must start with or contain one of these phrases
+    expl_patterns = [
+        "how", "what is", "explain", "tell me about", 
+        "describe", "what does", "how does", "what are"
+    ]
+    is_expl = any(lowered.startswith(p) for p in expl_patterns) or "how does" in lowered or "what does" in lowered
+    
+    # Must NOT contain data extraction words
+    data_words = [
+        "count", "list", "show", "find", "how many", 
+        "give me", "fetch", "get", "total", "number of"
+    ]
+    has_data_word = any(w in lowered for w in data_words)
+    
+    return is_expl and not has_data_word
+
 _openai_client: AsyncOpenAI | None = None
 
 
@@ -495,12 +514,19 @@ For single records:
 For no results:
 No records found for your request.
 
-LANGUAGE: Reply in the same language the user wrote in.
+LANGUAGE RULE — CRITICAL:
+Detect the language from the USER'S QUESTION only.
+Never use the language found in the database data.
+The database may contain data in any language — ignore it
+for language detection.
+User question: {question}
+Reply strictly in the language of that question above.
+If the question is in English, reply in English.
+If the question is in Hindi, reply in Hindi.
+If the question is in any other language, reply in that language.
+Database data language does not influence the reply language.
 
-User asked: {question}
-Data: {json.dumps(sql_results[:50], default=str)}
-
-Reply:"""
+━━━ DATA ━━━
 
     reply = await _call_mistral(
         [
@@ -596,6 +622,44 @@ async def handle_message(msg: BotMessage) -> None:
 
         if credentials.db_type.lower() == "postgresql":
             blueprint = credentials.schema_blueprint or "No schema available."
+            
+            if is_explanatory_question(msg.text):
+                system = f"""You are a business assistant for {tenant.company_name}.
+The user is asking about how something works in their system.
+
+Answer based on this database schema:
+{blueprint}
+
+Rules:
+- Explain in plain simple language
+- Use the actual table and column names from the schema
+- Keep it under 8 lines
+- Plain text only, no markdown, no asterisks
+
+LANGUAGE RULE — CRITICAL:
+Detect the language from the USER'S QUESTION only.
+Never use the language found in the database data.
+The database may contain data in any language — ignore it
+for language detection.
+User question: {msg.text}
+Reply strictly in the language of that question above.
+If the question is in English, reply in English.
+If the question is in Hindi, reply in Hindi.
+If the question is in any other language, reply in that language.
+Database data language does not influence the reply language.
+"""
+                reply = await _call_mistral(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": msg.text}
+                    ],
+                    max_tokens=400,
+                    model=RESPONSE_FORMAT_MODEL
+                )
+                await send_reply(msg, reply)
+                return
+
+            # ── SQL GENERATION (GPT-4o mini) ──
             final_error: str | None = None
             sql_query = ""
             query_rows: list[dict[str, Any]] = []
@@ -704,7 +768,18 @@ async def handle_message(msg: BotMessage) -> None:
                 "Instructions:\n"
                 "- Answer the user's question using ONLY the data above.\n"
                 "- Be concise and friendly.\n"
-                "- Reply in exactly the same language the user wrote in."
+                "- Plain text only, no markdown.\n\n"
+                "LANGUAGE RULE — CRITICAL:\n"
+                "Detect the language from the USER'S QUESTION only.\n"
+                "Never use the language found in the database data.\n"
+                "The database may contain data in any language — ignore it\n"
+                "for language detection.\n"
+                f"User question: {msg.text}\n"
+                "Reply strictly in the language of that question above.\n"
+                "If the question is in English, reply in English.\n"
+                "If the question is in Hindi, reply in Hindi.\n"
+                "If the question is in any other language, reply in that language.\n"
+                "Database data language does not influence the reply language."
             )
             reply = await _call_mistral(
                 [
