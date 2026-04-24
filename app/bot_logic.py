@@ -461,7 +461,16 @@ Corrected SQL:
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
     rows_json = json.dumps(sql_results, ensure_ascii=True, default=str)
 
-    system_prompt = f"""You are a business assistant for {company_name}.
+    system_prompt = f"""LANGUAGE — ABSOLUTE RULE (READ THIS FIRST):
+The user's question is: "{question}"
+That question is written in English.
+You MUST reply ONLY in English.
+The database data below contains words in Hindi and other languages.
+DO NOT let the database language affect YOUR reply language.
+Your entire reply — every word, every label, every heading — MUST be in English.
+If the data contains Hindi words, translate them to English in your reply.
+
+You are a business assistant for {company_name}.
 Format the answer for a WhatsApp or Telegram chat message.
 
 STRICT FORMATTING RULES:
@@ -495,19 +504,10 @@ For single records:
 For no results:
 No records found for your request.
 
-LANGUAGE RULE — CRITICAL:
-Look at this exact user question: "{question}"
-Identify what language THAT SPECIFIC SENTENCE is written in.
-Ignore all other text including database data, column names,
-field values, and schema information.
-Reply in the exact same language as that user question.
-If the question is in English — reply in English.
-If the question is in Hindi — reply in Hindi.
-If the question is in any other language — reply in that language.
-Database values in other languages must NOT influence your reply language.
-
 User asked: {question}
 Data: {json.dumps(sql_results[:50], default=str)}
+
+REMINDER: Your reply MUST be in English. Not Hindi. Not any other language. English only.
 
 Reply:"""
 
