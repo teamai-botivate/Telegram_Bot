@@ -42,7 +42,7 @@ async def test_fetch_postgres_schema_requires_database_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_decrypt_and_connect_timeout_has_actionable_error(monkeypatch) -> None:
+async def test_open_fresh_connection_timeout_has_actionable_error(monkeypatch) -> None:
     credential = SimpleNamespace(
         db_type="postgresql",
         connection_url="encrypted",
@@ -55,7 +55,7 @@ async def test_decrypt_and_connect_timeout_has_actionable_error(monkeypatch) -> 
     monkeypatch.setattr(database.asyncpg, "connect", AsyncMock(side_effect=TimeoutError()))
 
     with pytest.raises(database.TenantDBConnectionError) as exc_info:
-        await database.decrypt_and_connect("tenant-id")
+        await database._open_fresh_connection("tenant-id")
 
     assert "timed out" in str(exc_info.value).lower()
 
@@ -66,12 +66,20 @@ def test_sanitize_select_sql_rejects_non_select() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_tenant_query_executes_query_directly_without_explain(monkeypatch) -> None:
+async def test_execute_tenant_query_executes_query_via_pool(monkeypatch) -> None:
     connection = SimpleNamespace(
         fetch=AsyncMock(return_value=[{"id": 1, "name": "Alice"}]),
-        close=AsyncMock(),
     )
-    monkeypatch.setattr(database, "decrypt_and_connect", AsyncMock(return_value=connection))
+
+    class FakePool:
+        def acquire(self):
+            return self
+        async def __aenter__(self):
+            return connection
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(database, "_get_pool_for_tenant", AsyncMock(return_value=FakePool()))
 
     rows = await database.execute_tenant_query("tenant-id", "SELECT id, name FROM users LIMIT 10")
 
@@ -79,7 +87,6 @@ async def test_execute_tenant_query_executes_query_directly_without_explain(monk
     assert connection.fetch.await_count == 1
     first_call_sql = connection.fetch.await_args_list[0].args[0]
     assert first_call_sql == "SELECT id, name FROM users LIMIT 10"
-    connection.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -89,9 +96,17 @@ async def test_execute_tenant_query_raises_query_error_when_query_fails(monkeypa
 
     connection = SimpleNamespace(
         fetch=AsyncMock(side_effect=FakePgError("syntax error at or near FROM")),
-        close=AsyncMock(),
     )
-    monkeypatch.setattr(database, "decrypt_and_connect", AsyncMock(return_value=connection))
+
+    class FakePool:
+        def acquire(self):
+            return self
+        async def __aenter__(self):
+            return connection
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(database, "_get_pool_for_tenant", AsyncMock(return_value=FakePool()))
 
     with pytest.raises(database.QueryExecutionError) as exc_info:
         await database.execute_tenant_query("tenant-id", "SELECT id name FROM users")

@@ -60,3 +60,16 @@ async def startup() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
 	return {"status": "ok"}
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+	from .database import _tenant_pools
+
+	for tid, pool in _tenant_pools.items():
+		try:
+			await pool.close()
+			logger.info("Closed tenant pool for %s", tid)
+		except Exception:
+			logger.exception("Error closing tenant pool %s", tid)
+	_tenant_pools.clear()

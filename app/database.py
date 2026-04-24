@@ -22,9 +22,13 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 FERNET_SECRET_KEY = os.getenv("FERNET_SECRET_KEY", "")
-TENANT_DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("TENANT_DB_CONNECT_TIMEOUT_SECONDS", "20"))
-TENANT_DB_CONNECT_RETRIES = int(os.getenv("TENANT_DB_CONNECT_RETRIES", "1"))
+TENANT_DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("TENANT_DB_CONNECT_TIMEOUT_SECONDS", "30"))
+TENANT_DB_CONNECT_RETRIES = int(os.getenv("TENANT_DB_CONNECT_RETRIES", "2"))
 logger = logging.getLogger(__name__)
+
+# ── Per-tenant connection pool cache ──
+_tenant_pools: dict[str, asyncpg.Pool] = {}
+_pool_lock = asyncio.Lock()
 
 
 class TenantDBConnectionError(Exception):
@@ -247,7 +251,41 @@ async def _touch_last_connected(credential_id: uuid.UUID) -> None:
 		await session.commit()
 
 
-async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
+def _resolve_tenant_dsn(credential: TenantDBCredential) -> tuple[str, str]:
+	"""Decrypt and normalize a tenant's connection URL. Returns (clean_url, ssl_arg)."""
+	from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+	try:
+		connection_string = _decrypt_credential_value(credential.connection_url)
+	except (InvalidToken, ValueError):
+		raise TenantDBConnectionError("Tenant database credentials are invalid or could not be decrypted.")
+
+	normalized_url = _convert_to_asyncpg_url(connection_string)
+	parsed = urlparse(normalized_url)
+	if not parsed.hostname:
+		raise TenantDBConnectionError("Tenant DB hostname is missing in connection URL.")
+	if not parsed.path or parsed.path == "/":
+		raise TenantDBConnectionError("Tenant DB name is missing in connection URL.")
+	query_params = parse_qs(parsed.query)
+
+	# asyncpg doesn't understand sslmode=; strip it and pass ssl= explicitly
+	ssl_mode = query_params.pop("sslmode", query_params.pop("ssl", [None]))[0]
+	clean_query = urlencode({k: v[0] for k, v in query_params.items()})
+	clean_url = urlunparse(parsed._replace(query=clean_query))
+
+	# Determine SSL setting
+	if ssl_mode and ssl_mode in ("require", "prefer", "disable", "verify-ca", "verify-full"):
+		ssl_arg = ssl_mode
+	elif credential.ssl_required:
+		ssl_arg = "require"
+	else:
+		ssl_arg = "prefer"
+
+	return clean_url, ssl_arg
+
+
+async def _open_fresh_connection(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
+	"""Open a direct (non-pooled) connection. Used for schema introspection."""
 	credential = await get_tenant_credentials(tenant_id)
 	if credential is None:
 		raise TenantDBConnectionError("Tenant database is not configured yet.")
@@ -255,35 +293,9 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 	if credential.db_type.lower() != "postgresql":
 		raise TenantDBConnectionError("Only PostgreSQL tenant databases are currently supported.")
 
-	try:
-		connection_string = _decrypt_credential_value(credential.connection_url)
-	except (InvalidToken, ValueError):
-		raise TenantDBConnectionError("Tenant database credentials are invalid or could not be decrypted.")
+	clean_url, ssl_arg = _resolve_tenant_dsn(credential)
 
 	try:
-		from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-
-		normalized_url = _convert_to_asyncpg_url(connection_string)
-		parsed = urlparse(normalized_url)
-		if not parsed.hostname:
-			raise TenantDBConnectionError("Tenant DB hostname is missing in connection URL.")
-		if not parsed.path or parsed.path == "/":
-			raise TenantDBConnectionError("Tenant DB name is missing in connection URL.")
-		query_params = parse_qs(parsed.query)
-
-		# asyncpg doesn't understand sslmode=; strip it and pass ssl= explicitly
-		ssl_mode = query_params.pop("sslmode", query_params.pop("ssl", [None]))[0]
-		clean_query = urlencode({k: v[0] for k, v in query_params.items()})
-		clean_url = urlunparse(parsed._replace(query=clean_query))
-
-		# Determine SSL setting
-		if ssl_mode and ssl_mode in ("require", "prefer", "disable", "verify-ca", "verify-full"):
-			ssl_arg = ssl_mode
-		elif credential.ssl_required:
-			ssl_arg = "require"
-		else:
-			ssl_arg = "prefer"
-
 		last_error: Exception | None = None
 		attempts = max(1, TENANT_DB_CONNECT_RETRIES + 1)
 		for attempt in range(1, attempts + 1):
@@ -308,37 +320,73 @@ async def decrypt_and_connect(tenant_id: uuid.UUID | str) -> asyncpg.Connection:
 		raise TenantDBConnectionError(f"Could not connect to tenant database: {_describe_connection_exception(exc)}")
 
 
+async def get_tenant_pool(tenant_id: str, connection_string: str, ssl_arg: str) -> asyncpg.Pool:
+	"""Return a cached connection pool for the given tenant, creating one if needed."""
+	async with _pool_lock:
+		if tenant_id not in _tenant_pools:
+			_tenant_pools[tenant_id] = await asyncpg.create_pool(
+				connection_string,
+				ssl=ssl_arg,
+				min_size=1,
+				max_size=3,
+				command_timeout=30,
+				max_inactive_connection_lifetime=300,
+			)
+		return _tenant_pools[tenant_id]
+
+
+async def _get_pool_for_tenant(tenant_id: uuid.UUID | str) -> asyncpg.Pool:
+	"""Resolve credentials and return a pooled connection for a tenant."""
+	credential = await get_tenant_credentials(tenant_id)
+	if credential is None:
+		raise TenantDBConnectionError("Tenant database is not configured yet.")
+
+	if credential.db_type.lower() != "postgresql":
+		raise TenantDBConnectionError("Only PostgreSQL tenant databases are currently supported.")
+
+	clean_url, ssl_arg = _resolve_tenant_dsn(credential)
+	tid = str(tenant_id)
+
+	try:
+		pool = await get_tenant_pool(tid, clean_url, ssl_arg)
+		await _touch_last_connected(credential.id)
+		return pool
+	except TenantDBConnectionError:
+		raise
+	except Exception as exc:
+		raise TenantDBConnectionError(f"Could not connect to tenant database: {_describe_connection_exception(exc)}")
+
+
 async def execute_tenant_query(
 	tenant_id: uuid.UUID | str,
 	sql: str,
 	*params: Any,
 	allow_select_star: bool = False,
 ) -> list[dict[str, Any]]:
-	connection = await decrypt_and_connect(tenant_id)
+	pool = await _get_pool_for_tenant(tenant_id)
 
-	try:
-		safe_sql = _sanitize_select_sql(sql, allow_select_star=allow_select_star)
-		logger.info(
-			"Tenant query attempt tenant_id=%s timestamp=%s sql=%s",
-			tenant_id,
-			datetime.now(timezone.utc).isoformat(),
-			safe_sql,
-		)
+	async with pool.acquire() as connection:
+		try:
+			safe_sql = _sanitize_select_sql(sql, allow_select_star=allow_select_star)
+			logger.info(
+				"Tenant query attempt tenant_id=%s timestamp=%s sql=%s",
+				tenant_id,
+				datetime.now(timezone.utc).isoformat(),
+				safe_sql,
+			)
 
-		rows = await connection.fetch(safe_sql, *params)
-		return [dict(row) for row in rows]
-	except QueryExecutionError:
-		raise
-	except SecurityError:
-		raise
-	except asyncpg.PostgresError as e:
-		logger.error(f"PostgresError executing tenant query. SQL: {sql} | Error: {e}")
-		raise QueryExecutionError(f"Failed to execute query: {e}")
-	except Exception as e:
-		logger.error(f"Unexpected error executing tenant query: {e}")
-		raise QueryExecutionError("An unexpected error occurred while running tenant query.")
-	finally:
-		await connection.close()
+			rows = await connection.fetch(safe_sql, *params)
+			return [dict(row) for row in rows]
+		except QueryExecutionError:
+			raise
+		except SecurityError:
+			raise
+		except asyncpg.PostgresError as e:
+			logger.error(f"PostgresError executing tenant query. SQL: {sql} | Error: {e}")
+			raise QueryExecutionError(f"Failed to execute query: {e}")
+		except Exception as e:
+			logger.error(f"Unexpected error executing tenant query: {e}")
+			raise QueryExecutionError("An unexpected error occurred while running tenant query.")
 
 
 async def create_tenant_record(company_name: str, active_modules: list[str]) -> uuid.UUID:
