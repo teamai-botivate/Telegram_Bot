@@ -605,82 +605,90 @@ async def handle_message(msg: BotMessage) -> None:
 
         if credentials.db_type.lower() == "postgresql":
             blueprint = credentials.schema_blueprint or "No schema available."
-            final_error: str | None = None
-            sql_query = ""
             query_rows: list[dict[str, Any]] = []
 
-            if detect_multi_table_query(msg.text):
-                table_names = _extract_table_names_from_blueprint(blueprint)
-                logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
-                if not table_names:
-                    await send_reply(msg, "I couldn't find any tables in the schema blueprint for this tenant.")
-                    return
-
-                combined_rows: list[dict[str, Any]] = []
-                for table_name in table_names:
-                    table_sql = f"SELECT * FROM {table_name} LIMIT 2"
-                    logger.info(f"[SQL_OUT] {table_sql}")
-                    try:
-                        rows = await execute_tenant_query(tenant.id, table_sql, allow_select_star=True)
-                        for row in rows:
-                            normalized = dict(row)
-                            normalized["table_source"] = table_name
-                            combined_rows.append(normalized)
-                        logger.info(f"[SQL_OK] rows_returned={len(rows)}")
-                    except TenantDBConnectionError as e:
-                        logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
-                        await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
+            try:
+                if detect_multi_table_query(msg.text):
+                    table_names = _extract_table_names_from_blueprint(blueprint)
+                    logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
+                    if not table_names:
+                        await send_reply(msg, "I couldn't find any tables in the schema blueprint for this tenant.")
                         return
-                    except (QueryExecutionError, SecurityError) as e:
-                        logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
-                query_rows = combined_rows
-            else:
-                # ── SQL GENERATION (GPT-4o mini) ──
-                sql_query = await generate_sql_query(
-                    tenant.company_name,
-                    blueprint,
-                    msg.text,
-                    auto_schema_hints=getattr(credentials, "auto_schema_hints", None),
-                )
-                sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
-                sql_query = _validate_generated_sql(sql_query)
-                logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
-                logger.info(f"[SQL_OUT] {sql_query}")
 
-                max_retries = 2
-                attempt = 0
-                while True:
-                    try:
-                        query_rows = await execute_tenant_query(tenant.id, sql_query)
-                        logger.info(f"[SQL_OK] rows_returned={len(query_rows)}")
-                        break
-                    except TenantDBConnectionError as exec_error:
-                        logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{exec_error}'")
-                        await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
-                        return
-                    except (QueryExecutionError, SecurityError) as exec_error:
-                        final_error = str(exec_error)
-                        logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{final_error}'")
-                        if attempt >= max_retries:
-                            logger.error(
-                                f"[SQL_FAILED] tenant={tenant.id} question='{msg.text}' "
-                                f"final_sql='{sql_query}' error='{final_error}'"
-                            )
-                            await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
+                    combined_rows: list[dict[str, Any]] = []
+                    for table_name in table_names:
+                        table_sql = f"SELECT * FROM {table_name} LIMIT 2"
+                        logger.info(f"[SQL_OUT] {table_sql}")
+                        try:
+                            rows = await execute_tenant_query(tenant.id, table_sql, allow_select_star=True)
+                            for row in rows:
+                                normalized = dict(row)
+                                normalized["table_source"] = table_name
+                                combined_rows.append(normalized)
+                            logger.info(f"[SQL_OK] rows_returned={len(rows)}")
+                        except TenantDBConnectionError as e:
+                            logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
+                            await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
                             return
-                        attempt += 1
-                        sql_query = await fix_sql(sql_query, final_error, blueprint)
-                        sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
-                        sql_query = _validate_generated_sql(sql_query)
-                        logger.info(f"[SQL_OUT] {sql_query}")
+                        except (QueryExecutionError, SecurityError) as e:
+                            logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
+                    query_rows = combined_rows
+                else:
+                    # ── SQL GENERATION (GPT-4o mini) ──
+                    sql_query = await generate_sql_query(
+                        tenant.company_name,
+                        blueprint,
+                        msg.text,
+                        auto_schema_hints=getattr(credentials, "auto_schema_hints", None),
+                    )
+                    sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
+                    sql_query = _validate_generated_sql(sql_query)
+                    logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
+                    logger.info(f"[SQL_OUT] {sql_query}")
+
+                    max_retries = 2
+                    attempt = 0
+                    while True:
+                        try:
+                            query_rows = await execute_tenant_query(tenant.id, sql_query)
+                            logger.info(f"[SQL_OK] rows_returned={len(query_rows)}")
+                            break
+                        except TenantDBConnectionError as exec_error:
+                            logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{exec_error}'")
+                            await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
+                            return
+                        except (QueryExecutionError, SecurityError) as exec_error:
+                            final_error = str(exec_error)
+                            logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{final_error}'")
+                            if attempt >= max_retries:
+                                logger.error(
+                                    f"[SQL_FAILED] tenant={tenant.id} question='{msg.text}' "
+                                    f"final_sql='{sql_query}' error='{final_error}'"
+                                )
+                                await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
+                                return
+                            attempt += 1
+                            sql_query = await fix_sql(sql_query, final_error, blueprint)
+                            sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
+                            sql_query = _validate_generated_sql(sql_query)
+                            logger.info(f"[SQL_OUT] {sql_query}")
+
+            except Exception as sql_pipeline_error:
+                logger.exception("[SQL_PIPELINE] Unhandled error in SQL pipeline for tenant %s", tenant.id)
+                await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
+                return
 
             if not query_rows:
                 await send_reply(msg, "I couldn't find any data matching your request.")
                 return
 
             # ── REPLY FORMATTING (Mistral) ──
-            reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
-            await send_reply(msg, reply or "I couldn't generate a response from the returned records.")
+            try:
+                reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
+                await send_reply(msg, reply or "I couldn't generate a response from the returned records.")
+            except Exception as fmt_error:
+                logger.error(f"[FORMAT_ERR] {fmt_error}")
+                await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
             return
 
         if credentials.db_type.lower() == "google_sheets":
@@ -737,10 +745,6 @@ async def handle_message(msg: BotMessage) -> None:
         await send_reply(msg, "Unsupported tenant data source configuration.")
     except Exception:
         logger.exception("Failed to process customer message for chat_id %s", msg.chat_id)
-        try:
-            await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
-        except Exception:
-            pass
 
 
 __all__ = ["handle_message", "fix_sql", "generate_sql_query"]
