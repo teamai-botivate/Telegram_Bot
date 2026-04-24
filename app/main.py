@@ -66,10 +66,13 @@ async def health() -> dict[str, str]:
 async def shutdown() -> None:
 	from .database import _tenant_pools
 
-	for tid, pool in _tenant_pools.items():
+	for tid, pool in list(_tenant_pools.items()):
 		try:
-			await pool.close()
+			await asyncio.wait_for(pool.close(), timeout=5.0)
 			logger.info("Closed tenant pool for %s", tid)
+		except TimeoutError:
+			logger.warning("Pool close timed out for %s, terminating", tid)
+			pool.terminate()
 		except Exception:
 			logger.exception("Error closing tenant pool %s", tid)
 	_tenant_pools.clear()

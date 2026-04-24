@@ -337,12 +337,12 @@ async def get_tenant_pool(tenant_id: str, connection_string: str, ssl_arg: str) 
 
 
 async def _evict_tenant_pool(tenant_id: str) -> None:
-	"""Close and remove a stale pool from the cache."""
+	"""Force-close and remove a stale pool from the cache."""
 	async with _pool_lock:
 		pool = _tenant_pools.pop(tenant_id, None)
 		if pool is not None:
 			try:
-				await pool.close()
+				pool.terminate()
 			except Exception:
 				pass
 	logger.info("Evicted stale pool for tenant %s", tenant_id)
