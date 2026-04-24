@@ -378,6 +378,23 @@ in the same query.
 ━━━ AUTO-INFERRED SCHEMA RULES ━━━
 {hints_section}
 
+━━━ PENDING / STATUS RULES (CRITICAL) ━━━
+When the user asks about "pending", "incomplete", "not done",
+"not submitted", or "overdue" records:
+- Do NOT filter by a text column like status = 'pending'
+- Instead look at the Status hints in the AUTO-INFERRED SCHEMA RULES above
+- Use IS NULL on the submission_date or relevant date column
+- Example: pending checklist = WHERE c.submission_date IS NULL
+- Example: completed delegation = WHERE d.submission_date IS NOT NULL
+- Only use a status text column if the sample values explicitly
+  include the word "pending"
+
+━━━ TABLE EXCLUSION ━━━
+- NEVER query tables starting with "extensions." or "pg_"
+- Ignore: extensions.pg_stat_statements, extensions.pg_stat_statements_info
+- Only use business tables: checklist, delegation, delegation_done,
+  users, working_day_calender (and any other non-system tables)
+
 ━━━ OUTPUT RULES ━━━
 - Output ONLY the raw SQL query
 - No markdown, no backticks, no explanation, no comments

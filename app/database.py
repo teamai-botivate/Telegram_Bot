@@ -475,7 +475,7 @@ async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
 		column_sql = """
 		SELECT table_schema, table_name, column_name, data_type, udt_name, is_nullable
 		FROM information_schema.columns
-		WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
+		WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime', 'extensions')
 		ORDER BY table_schema, table_name, ordinal_position;
 		"""
 		rows = await connection.fetch(column_sql)
@@ -496,7 +496,7 @@ async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
 			ON ccu.constraint_name = tc.constraint_name
 			AND ccu.table_schema = tc.table_schema
 		WHERE tc.constraint_type = 'FOREIGN KEY'
-			AND tc.table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime')
+			AND tc.table_schema NOT IN ('information_schema', 'pg_catalog', 'auth', 'storage', 'vault', 'realtime', 'extensions')
 		ORDER BY tc.table_schema, tc.table_name, kcu.column_name;
 		"""
 		fk_rows = await connection.fetch(fk_sql)
