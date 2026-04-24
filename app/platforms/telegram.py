@@ -49,8 +49,6 @@ async def send_message(chat_id: str, text: str) -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise TelegramSendError("TELEGRAM_BOT_TOKEN is not configured in .env.")
 
-    await send_typing(chat_id)
-
     url = _build_telegram_url("sendMessage")
     chunks = _chunk_text(text)
 

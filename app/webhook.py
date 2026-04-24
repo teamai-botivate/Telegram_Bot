@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import Any
@@ -38,7 +39,7 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
 			return {"ok": True}
 
 		msg = BotMessage(platform=Platform.TELEGRAM, chat_id=str(chat_id_value), text=text)
-		await handle_message(msg)
+		asyncio.create_task(handle_message(msg))
 	except Exception:
 		logger.exception("Error while processing Telegram webhook payload.")
 
@@ -91,7 +92,7 @@ async def whatsapp_webhook(request: Request) -> dict[str, str]:
 
 		if isinstance(phone, str) and isinstance(text, str) and phone and text:
 			msg = BotMessage(platform=Platform.WHATSAPP, chat_id=phone, text=text)
-			await handle_message(msg)
+			asyncio.create_task(handle_message(msg))
 	except Exception:
 		logger.exception("Error while processing WhatsApp webhook payload.")
 

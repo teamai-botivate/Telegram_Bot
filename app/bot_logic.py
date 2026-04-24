@@ -552,6 +552,14 @@ def _validate_generated_sql(sql: str) -> str:
 
 
 async def handle_message(msg: BotMessage) -> None:
+    # Show typing indicator immediately so the user knows we're working
+    try:
+        if msg.platform == Platform.TELEGRAM:
+            from .platforms.telegram import send_typing
+            await send_typing(msg.chat_id)
+    except Exception:
+        pass  # never block message processing for a typing indicator
+
     try:
         text_upper = msg.text.strip().upper()
         text_normalized = msg.text.strip().lower()
