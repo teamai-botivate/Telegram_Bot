@@ -140,21 +140,34 @@ def _asks_for_everything(question: str) -> bool:
 
 async def is_off_topic(text: str) -> bool:
     prompt = (
-        "Does this message relate to business data queries like tasks, "
-        "meetings, deliveries, employees, or reports? "
-        "Reply only YES or NO.\n"
-        f"Message: {text}"
+        "You are a classifier for a business database chatbot.\n"
+        "The user can ask about ANY data that might exist in their company database.\n"
+        "This includes but is not limited to:\n"
+        "- employees, users, staff, team members\n"
+        "- emails, phone numbers, addresses, passwords, credentials\n"
+        "- tasks, checklists, assignments, deadlines\n"
+        "- meetings, schedules, attendance, leaves\n"
+        "- deliveries, orders, invoices, payments\n"
+        "- departments, roles, access levels\n"
+        "- reports, counts, summaries, statistics\n"
+        "- any data lookup by name, date, status, or ID\n\n"
+        "Reply YES if the message is asking about data that could exist in a business database.\n"
+        "Reply NO only if the message is clearly personal chat, jokes, general knowledge, "
+        "weather, news, or completely unrelated to any business data.\n\n"
+        f"Message: {text}\n"
+        "Answer (YES or NO):"
     )
     try:
         answer = await _call_mistral(
             [{"role": "user", "content": prompt}],
-            max_tokens=8,
+            max_tokens=5,
             model=RESPONSE_FORMAT_MODEL,
         )
     except Exception as exc:
         logger.warning("Off-topic detection failed open: %s", exc)
         return False
 
+    # Note: YES means it IS business-related, so off-topic = starts with NO
     return answer.strip().upper().startswith("NO")
 
 
