@@ -329,10 +329,23 @@ async def get_tenant_pool(tenant_id: str, connection_string: str, ssl_arg: str) 
 				ssl=ssl_arg,
 				min_size=1,
 				max_size=3,
+				timeout=TENANT_DB_CONNECT_TIMEOUT_SECONDS,
 				command_timeout=30,
-				max_inactive_connection_lifetime=300,
+				max_inactive_connection_lifetime=60,
 			)
 		return _tenant_pools[tenant_id]
+
+
+async def _evict_tenant_pool(tenant_id: str) -> None:
+	"""Close and remove a stale pool from the cache."""
+	async with _pool_lock:
+		pool = _tenant_pools.pop(tenant_id, None)
+		if pool is not None:
+			try:
+				await pool.close()
+			except Exception:
+				pass
+	logger.info("Evicted stale pool for tenant %s", tenant_id)
 
 
 async def _get_pool_for_tenant(tenant_id: uuid.UUID | str) -> asyncpg.Pool:
@@ -363,20 +376,28 @@ async def execute_tenant_query(
 	*params: Any,
 	allow_select_star: bool = False,
 ) -> list[dict[str, Any]]:
-	pool = await _get_pool_for_tenant(tenant_id)
+	tid = str(tenant_id)
 
-	async with pool.acquire() as connection:
+	for attempt in range(2):
+		pool = await _get_pool_for_tenant(tenant_id)
 		try:
-			safe_sql = _sanitize_select_sql(sql, allow_select_star=allow_select_star)
-			logger.info(
-				"Tenant query attempt tenant_id=%s timestamp=%s sql=%s",
-				tenant_id,
-				datetime.now(timezone.utc).isoformat(),
-				safe_sql,
-			)
+			async with pool.acquire() as connection:
+				safe_sql = _sanitize_select_sql(sql, allow_select_star=allow_select_star)
+				logger.info(
+					"Tenant query attempt tenant_id=%s timestamp=%s sql=%s",
+					tenant_id,
+					datetime.now(timezone.utc).isoformat(),
+					safe_sql,
+				)
 
-			rows = await connection.fetch(safe_sql, *params)
-			return [dict(row) for row in rows]
+				rows = await connection.fetch(safe_sql, *params)
+				return [dict(row) for row in rows]
+		except (TimeoutError, OSError, ConnectionResetError) as e:
+			# Pool connection is stale — evict and retry once
+			logger.warning("Pool connection failed for tenant %s (attempt %d): %s", tid, attempt + 1, e)
+			await _evict_tenant_pool(tid)
+			if attempt == 1:
+				raise TenantDBConnectionError(f"Could not connect to tenant database after retry: {e}")
 		except QueryExecutionError:
 			raise
 		except SecurityError:
