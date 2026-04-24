@@ -495,7 +495,16 @@ For single records:
 For no results:
 No records found for your request.
 
-LANGUAGE: Reply in the same language the user wrote in.
+LANGUAGE RULE — CRITICAL:
+Look at this exact user question: "{question}"
+Identify what language THAT SPECIFIC SENTENCE is written in.
+Ignore all other text including database data, column names,
+field values, and schema information.
+Reply in the exact same language as that user question.
+If the question is in English — reply in English.
+If the question is in Hindi — reply in Hindi.
+If the question is in any other language — reply in that language.
+Database values in other languages must NOT influence your reply language.
 
 User asked: {question}
 Data: {json.dumps(sql_results[:50], default=str)}
@@ -704,7 +713,15 @@ async def handle_message(msg: BotMessage) -> None:
                 "Instructions:\n"
                 "- Answer the user's question using ONLY the data above.\n"
                 "- Be concise and friendly.\n"
-                "- Reply in exactly the same language the user wrote in."
+                f"LANGUAGE RULE — CRITICAL:\n"
+                f'Look at this exact user question: \"{msg.text}\"\n'
+                "Identify what language THAT SPECIFIC SENTENCE is written in.\n"
+                "Ignore all other text including database data, column names, field values, and schema information.\n"
+                "Reply in the exact same language as that user question.\n"
+                "If the question is in English — reply in English.\n"
+                "If the question is in Hindi — reply in Hindi.\n"
+                "If the question is in any other language — reply in that language.\n"
+                "Database values in other languages must NOT influence your reply language."
             )
             reply = await _call_mistral(
                 [
