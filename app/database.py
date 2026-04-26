@@ -410,6 +410,35 @@ async def execute_tenant_query(
 			raise QueryExecutionError("An unexpected error occurred while running tenant query.")
 
 
+async def explain_validate_sql(tenant_id: uuid.UUID | str, sql: str) -> tuple[bool, str]:
+	"""Run EXPLAIN on the SQL against the tenant's database to validate structure.
+
+	Returns (is_valid, error_message). If valid, error_message is empty.
+	This catches wrong column names, wrong table names, bad joins, and
+	syntax errors — without actually executing the query or touching data.
+	Works with any tenant schema automatically.
+	"""
+	tid = str(tenant_id)
+	try:
+		pool = await _get_pool_for_tenant(tenant_id)
+		async with pool.acquire() as connection:
+			await connection.fetch(f"EXPLAIN {sql}")
+		return True, ""
+	except (TimeoutError, OSError, ConnectionResetError) as e:
+		logger.warning("EXPLAIN connection failed for tenant %s: %s", tid, e)
+		await _evict_tenant_pool(tid)
+		# Connection issue, not SQL issue — let it pass through
+		return True, ""
+	except asyncpg.PostgresError as e:
+		error_msg = str(e)
+		logger.info("[EXPLAIN_FAIL] tenant=%s sql=%s error=%s", tid, sql, error_msg)
+		return False, error_msg
+	except Exception as e:
+		logger.warning("EXPLAIN unexpected error for tenant %s: %s", tid, e)
+		# Don't block on unexpected errors — let execution try
+		return True, ""
+
+
 async def create_tenant_record(company_name: str, active_modules: list[str]) -> uuid.UUID:
 	if session_factory is None:
 		raise RuntimeError("DATABASE_URL is not configured.")

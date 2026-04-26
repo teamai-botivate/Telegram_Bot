@@ -21,6 +21,7 @@ from .database import (
     SecurityError,
     TenantDBConnectionError,
     execute_tenant_query,
+    explain_validate_sql,
     get_tenant_by_chat_id,
     get_tenant_credentials,
 )
@@ -339,26 +340,88 @@ def _maybe_expand_count_query_across_tables(sql: str, schema_blueprint: str, que
     )
 
 
+async def _plan_query(
+    schema_blueprint: str,
+    question: str,
+    auto_schema_hints: str | None = None,
+) -> str:
+    """Step 1 of Chain-of-Thought: Analyze the schema and produce a structured
+    query plan WITHOUT writing any SQL. Works with any tenant schema."""
+    if auto_schema_hints and auto_schema_hints.strip():
+        hints_section = auto_schema_hints.strip()
+    else:
+        hints_section = "No auto-inferred schema rules available."
+
+    plan_prompt = f"""You are a database analyst. Your job is to read a user's
+question and a database schema, then produce a STRUCTURED QUERY PLAN.
+Do NOT write any SQL. Only output the plan.
+
+━━━ DATABASE SCHEMA ━━━
+{schema_blueprint}
+
+━━━ SCHEMA RULES ━━━
+{hints_section}
+
+━━━ PLANNING RULES ━━━
+- Only reference tables and columns that EXIST in the schema above
+- Never invent table or column names
+- For "pending"/"incomplete"/"not done" — check the schema rules for
+  Status hint lines. Use IS NULL on the indicated date column,
+  NOT a text status filter
+- For boolean columns, plan TRUE/FALSE filters, not text filters
+- For text searches, plan ILIKE filters
+- Ignore any tables starting with "extensions." or "pg_"
+
+━━━ USER QUESTION ━━━
+{question}
+
+━━━ OUTPUT FORMAT (strictly follow this) ━━━
+TABLES: [comma-separated list of tables to query]
+COLUMNS: [comma-separated list of columns to SELECT]
+FILTERS: [each WHERE condition on its own line]
+JOINS: [each JOIN with exact columns, or "none"]
+AGGREGATION: [COUNT/SUM/AVG with column, or "none"]
+ORDER: [ORDER BY clause, or "none"]
+LIMIT: [number, or "50" if not specified]
+REASONING: [one sentence explaining your approach]
+""".strip()
+
+    plan = await _call_openai_sql(plan_prompt, f"Create a query plan for: {question}")
+    logger.info("[SQL_PLAN] %s", plan.replace("\n", " | "))
+    return plan
+
+
 async def generate_sql_query(
     company_name: str,
     schema_blueprint: str,
     question: str,
     auto_schema_hints: str | None = None,
 ) -> str:
+    """Two-step Chain-of-Thought SQL generation.
+
+    Step 1: Plan which tables, columns, filters, and joins to use.
+    Step 2: Convert the plan into a valid PostgreSQL SELECT query.
+
+    Fully multi-tenant — uses the tenant's own schema_blueprint and hints.
+    """
+    # ── Step 1: Generate a structured query plan ──
+    plan = await _plan_query(schema_blueprint, question, auto_schema_hints)
+
+    # ── Step 2: Convert plan to SQL ──
     entities = _extract_entities(question)
     entities_json = json.dumps(entities, default=str)
     dynamic_aliases = build_table_aliases(schema_blueprint)
-    dynamic_examples = build_dynamic_examples(schema_blueprint)
 
     if auto_schema_hints and auto_schema_hints.strip():
         hints_section = auto_schema_hints.strip()
     else:
         hints_section = "No auto-inferred schema rules available."
 
-    system_prompt = f"""
-You are an expert PostgreSQL data analyst. Your only job is to
-write a single, correct SQL SELECT query based on the user's
-question and the database schema provided below.
+    system_prompt = f"""You are an expert PostgreSQL query writer. Convert the
+QUERY PLAN below into a single, correct SQL SELECT query.
+
+━━━ QUERY PLAN (from analysis step) ━━━
+{plan}
 
 ━━━ DATABASE SCHEMA ━━━
 {schema_blueprint}
@@ -366,85 +429,32 @@ question and the database schema provided below.
 ━━━ TABLE ALIASES ━━━
 {dynamic_aliases}
 
-CRITICAL ALIAS RULE:
-Always declare the alias directly after the table name in
-FROM and JOIN clauses using AS keyword.
-Correct:   FROM <table_name> AS <alias>
-Wrong:     FROM <table_name> WHERE <alias>.<column> (alias used
-           before being declared)
-Never reference an alias that has not been declared first
-in the same query.
-
-━━━ AUTO-INFERRED SCHEMA RULES ━━━
+━━━ SCHEMA RULES ━━━
 {hints_section}
 
-━━━ PENDING / STATUS RULES (CRITICAL) ━━━
-When the user asks about "pending", "incomplete", "not done",
-"not submitted", or "overdue" records:
-- Do NOT filter by a text column like status = 'pending'
-- Instead look at the Status hints in the AUTO-INFERRED SCHEMA RULES above
-- Use IS NULL on the submission_date or relevant date column
-- Example: pending checklist = WHERE c.submission_date IS NULL
-- Example: completed delegation = WHERE d.submission_date IS NOT NULL
-- Only use a status text column if the sample values explicitly
-  include the word "pending"
-
-━━━ TABLE EXCLUSION ━━━
-- NEVER query tables starting with "extensions." or "pg_"
-- Ignore: extensions.pg_stat_statements, extensions.pg_stat_statements_info
-- Only use business tables: checklist, delegation, delegation_done,
-  users, working_day_calender (and any other non-system tables)
-
-━━━ OUTPUT RULES ━━━
-- Output ONLY the raw SQL query
-- No markdown, no backticks, no explanation, no comments
+━━━ SQL RULES ━━━
+- Output ONLY the raw SQL query — no markdown, no backticks, no explanation
 - No semicolon at the end
-- Only SELECT statements -- never INSERT, UPDATE, DELETE,
-  DROP, ALTER, CREATE, TRUNCATE, GRANT, REVOKE
-
-━━━ QUERY WRITING RULES ━━━
-- Always use the table aliases defined above
-- Never use SELECT * -- always list column names explicitly
-- Use ILIKE for all text/name searches, never exact match
-- Use ILIKE only on text/varchar columns
-- For boolean columns use = TRUE or = FALSE (never ILIKE)
-- For nullable timestamp/date columns use IS NULL or IS NOT NULL
-- Add LIMIT 50 unless user asks for all records
-- For JOINs, use FK relationships shown in the schema above
-- Prefer LEFT JOIN over INNER JOIN unless certain every
-  row has a match
-- If a column or table is not in the schema, do not invent it
-
-━━━ DATE RULES ━━━
+- Only SELECT statements
+- Always declare aliases with AS: FROM table_name AS alias
+- Never use SELECT * — list columns explicitly
+- Use ILIKE for text searches (only on text/varchar columns)
+- For boolean columns use = TRUE or = FALSE
+- For nullable date/timestamp columns use IS NULL or IS NOT NULL
+- Prefer LEFT JOIN over INNER JOIN
+- If a column is not in the schema, do NOT invent it
+- For UNION ALL, cast all columns to ::text
 - Use CURRENT_DATE for today's date
-- For month queries use EXTRACT(MONTH FROM col) and
-  EXTRACT(YEAR FROM col)
-- Never assume a date column name -- always check the schema
-
-━━━ COUNT RULES ━━━
-- Always apply all relevant WHERE filters before counting
-- Never COUNT(*) a full table when a filtered count is implied
-- If counting items in a specific time period, filter by that
-  period explicitly
-
-━━━ UNION ALL RULES ━━━
-- If user asks for data from multiple tables separately,
-  use UNION ALL with a literal 'table_source' column to
-  identify which table each row came from
-- Match column count and compatible types across UNION ALL parts
-
-━━━ EXAMPLES FROM YOUR ACTUAL SCHEMA ━━━
-{dynamic_examples}
+- For month queries use EXTRACT(MONTH FROM col)
 
 ━━━ VALIDATION SELF-CHECK ━━━
 Before writing the final query, verify:
-1. Does every column I use exist in the schema above?
-2. Are JOINs using the correct FK columns?
-3. Is WHERE filtering correctly for this question?
-4. Does the expected result make logical sense?
-5. Am I only selecting columns relevant to the question?
+1. Every table and column exists in the schema above
+2. The plan's FILTERS match the SQL WHERE clause
+3. JOINs use correct columns from the schema
+4. LIMIT is included
 
-━━━ QUESTION ━━━
+━━━ ORIGINAL QUESTION ━━━
 {question}
 
 ━━━ ENTITIES ━━━
@@ -672,7 +682,7 @@ async def handle_message(msg: BotMessage) -> None:
                             logger.error(f"[SQL_ERR] attempt=1 error='{e}'")
                     query_rows = combined_rows
                 else:
-                    # ── SQL GENERATION (GPT-4o mini) ──
+                    # ── SQL GENERATION (Chain-of-Thought: Plan → SQL) ──
                     sql_query = await generate_sql_query(
                         tenant.company_name,
                         blueprint,
@@ -683,6 +693,15 @@ async def handle_message(msg: BotMessage) -> None:
                     sql_query = _validate_generated_sql(sql_query)
                     logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
                     logger.info(f"[SQL_OUT] {sql_query}")
+
+                    # ── EXPLAIN VALIDATION (pre-flight check) ──
+                    is_valid, explain_err = await explain_validate_sql(tenant.id, sql_query)
+                    if not is_valid:
+                        logger.warning(f"[EXPLAIN_FAIL] Pre-fixing SQL: {explain_err}")
+                        sql_query = await fix_sql(sql_query, explain_err, blueprint)
+                        sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
+                        sql_query = _validate_generated_sql(sql_query)
+                        logger.info(f"[SQL_FIXED_BY_EXPLAIN] {sql_query}")
 
                     max_retries = 2
                     attempt = 0
