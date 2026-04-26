@@ -352,8 +352,8 @@ async def _plan_query(
     else:
         hints_section = "No auto-inferred schema rules available."
 
-    plan_prompt = f"""You are a database analyst. Your job is to read a user's
-question and a database schema, then produce a STRUCTURED QUERY PLAN.
+    plan_prompt = f"""You are an expert database analyst. Read the user's question
+and the database schema carefully, then produce a STRUCTURED QUERY PLAN.
 Do NOT write any SQL. Only output the plan.
 
 ━━━ DATABASE SCHEMA ━━━
@@ -363,14 +363,24 @@ Do NOT write any SQL. Only output the plan.
 {hints_section}
 
 ━━━ PLANNING RULES ━━━
-- Only reference tables and columns that EXIST in the schema above
-- Never invent table or column names
-- For "pending"/"incomplete"/"not done" — check the schema rules for
-  Status hint lines. Use IS NULL on the indicated date column,
-  NOT a text status filter
-- For boolean columns, plan TRUE/FALSE filters, not text filters
-- For text searches, plan ILIKE filters
-- Ignore any tables starting with "extensions." or "pg_"
+1. ONLY reference tables and columns that EXIST in the schema above.
+   Read the column list for each table carefully before choosing.
+2. Never invent or guess table/column names. If unsure, pick the
+   closest matching column from the schema.
+3. STATUS / PENDING logic (choose the RIGHT strategy):
+   a) If the schema has a text column with sample values like
+      'pending', 'completed', 'not started' → filter by that column
+   b) If the schema rules have Status hint lines saying
+      "column IS NULL = pending" → use IS NULL on that date column
+   c) Never assume — always check what columns and values exist
+4. For boolean columns → plan TRUE/FALSE filters, never text
+5. For name/text searches → plan ILIKE '%value%' filters
+6. For "how many" / "count" questions → plan COUNT(*) aggregation
+7. For "list" / "show" / "what are" questions → plan to SELECT
+   the most useful columns (ID, name/description, status, date)
+8. Ignore tables starting with "extensions." or "pg_"
+9. If user mentions a person's name, search across ALL name-like
+   columns (name, user_name, given_by, assigned_to, etc.)
 
 ━━━ USER QUESTION ━━━
 {question}
@@ -378,12 +388,12 @@ Do NOT write any SQL. Only output the plan.
 ━━━ OUTPUT FORMAT (strictly follow this) ━━━
 TABLES: [comma-separated list of tables to query]
 COLUMNS: [comma-separated list of columns to SELECT]
-FILTERS: [each WHERE condition on its own line]
-JOINS: [each JOIN with exact columns, or "none"]
+FILTERS: [each WHERE condition on its own line, using exact column names]
+JOINS: [each JOIN with exact column names, or "none"]
 AGGREGATION: [COUNT/SUM/AVG with column, or "none"]
 ORDER: [ORDER BY clause, or "none"]
-LIMIT: [number, or "50" if not specified]
-REASONING: [one sentence explaining your approach]
+LIMIT: [number, or "50" if not specified by user]
+REASONING: [1-2 sentences explaining WHY you chose these tables/filters]
 """.strip()
 
     plan = await _call_openai_sql(plan_prompt, f"Create a query plan for: {question}")
@@ -499,62 +509,71 @@ Corrected SQL:
 
 
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
-    rows_json = json.dumps(sql_results, ensure_ascii=True, default=str)
+    total_rows = len(sql_results)
+    display_rows = sql_results[:10]
 
     system_prompt = f"""LANGUAGE — ABSOLUTE RULE (READ THIS FIRST):
-The user's question is: "{question}"
-That question is written in English.
-You MUST reply ONLY in English.
-The database data below contains words in Hindi and other languages.
-DO NOT let the database language affect YOUR reply language.
-Your entire reply — every word, every label, every heading — MUST be in English.
-If the data contains Hindi words, translate them to English in your reply.
+You MUST reply ONLY in English. If the data contains Hindi or other
+language words, translate them to English in your reply.
 
-You are a business assistant for {company_name}.
-Format the answer for a WhatsApp or Telegram chat message.
+You are a friendly business assistant for {company_name}.
+Format the answer for a WhatsApp/Telegram chat message.
 
-STRICT FORMATTING RULES:
-- Plain text only
-- No asterisks, no **bold**, no __underline__
-- No markdown of any kind
-- No | table | rows | with | pipes |
-- No --- dividers
-- For bullet points use: • item
-- For counts use plain text: "There are 365 tasks"
-- Separate sections with one blank line
-- Maximum 15 lines unless data truly requires more
-- If more than 5 records exist, show first 5 then write:
-  "Showing 5 of [total]. Ask me to filter by name, date or status."
+CONTEXT:
+- User asked: "{question}"
+- Total rows returned: {total_rows}
+- Data shown below: first {len(display_rows)} rows
 
-RESPONSE STRUCTURE:
-For counts:
-[Category 1]: [number]
-[Category 2]: [number]
+━━━ FORMATTING RULES ━━━
+- Plain text only. No markdown, no **bold**, no __underline__
+- No | table | format |, no --- dividers
+- Use emoji sparingly (1-2 max) for visual clarity
+- Keep reply concise: aim for 3-8 lines
 
-For record lists:
-Showing [n] results:
+━━━ RESPONSE PATTERNS ━━━
 
-- [main field]: [value]
-  [secondary field]: [value]
+IF the data has a single COUNT number:
+  Just state it naturally: "There are 835 pending tasks."
+  Do NOT say "Showing X of Y counts" — that's confusing.
 
-For single records:
-[Field]: [Value]
-[Field]: [Value]
+IF the data has multiple COUNT rows (grouped):
+  List each group:
+  [Group name]: [count]
+  [Group name]: [count]
+  Total: [sum]
 
-For no results:
-No records found for your request.
+IF the data is a list of records:
+  Show the most important 2-3 fields per record.
+  Skip fields that are all the same value (e.g., if every row has
+  department='HR', mention it once at the top, not per row).
+  Format:
+  1. [Main identifier] - [key detail]
+  2. [Main identifier] - [key detail]
+  ...
+  If total > {len(display_rows)}: "Showing {len(display_rows)} of {total_rows}. Ask me to filter by name, date, or status."
 
-User asked: {question}
-Data: {json.dumps(sql_results[:50], default=str)}
+IF the data is a single record:
+  List each field on its own line:
+  [Field]: [Value]
 
-REMINDER: Your reply MUST be in English. Not Hindi. Not any other language. English only.
+IF the data is empty:
+  "No records found matching your query."
+
+━━━ IMPORTANT ━━━
+- Answer the user's actual question directly first
+- Then show supporting data if needed
+- End with a brief follow-up suggestion when helpful
+  (e.g., "Need details for a specific person? Just ask!")
+
+Data:
+{json.dumps(display_rows, default=str)}
 
 Reply:"""
 
     reply = await _call_mistral(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Please answer my question using the data provided."},
+            {"role": "user", "content": f"Answer this: {question}"},
         ],
         max_tokens=600,
         model=RESPONSE_FORMAT_MODEL,
@@ -589,6 +608,43 @@ def _validate_generated_sql(sql: str) -> str:
         raise ValueError("Generated SQL uses SELECT * which is not allowed.")
 
     return cleaned
+
+
+async def _build_welcome_message(chat_id: str) -> str:
+    """Build a contextual welcome message showing what data is available."""
+    try:
+        tenant = await get_tenant_by_chat_id(chat_id)
+        if tenant is None:
+            return (
+                "Hi! I'm Botivate Bot.\n\n"
+                "I couldn't find your account yet. "
+                "Please use your onboarding link to get started."
+            )
+
+        credentials = await get_tenant_credentials(tenant.id)
+        if not credentials or not credentials.schema_blueprint:
+            return (
+                f"Hi! Welcome to {tenant.company_name}'s assistant.\n\n"
+                "Your database isn't configured yet. "
+                "Please contact your admin to complete setup."
+            )
+
+        # Extract table names from blueprint
+        table_names = _extract_table_names_from_blueprint(credentials.schema_blueprint)
+        tables_display = ", ".join(table_names) if table_names else "your business data"
+
+        return (
+            f"Hi! I'm {tenant.company_name}'s data assistant.\n\n"
+            f"I can query: {tables_display}\n\n"
+            "Try asking me:\n"
+            "\u2022 How many pending tasks?\n"
+            "\u2022 Show tasks assigned to [name]\n"
+            "\u2022 What is [name]'s email?\n"
+            "\u2022 Count records by department\n\n"
+            "Type /help anytime for more examples."
+        )
+    except Exception:
+        return "Hi! I'm ready. Ask me a business question and I'll fetch it from your data."
 
 
 async def handle_message(msg: BotMessage) -> None:
@@ -630,14 +686,32 @@ async def handle_message(msg: BotMessage) -> None:
         if (msg.platform == Platform.TELEGRAM and text_normalized == "/start") or (
             msg.platform == Platform.WHATSAPP and text_normalized == "start"
         ):
-            await send_reply(msg, "Hi! I'm ready. Ask me a business question and I'll fetch it from your data.")
+            # Build a contextual welcome with available data
+            welcome = await _build_welcome_message(msg.chat_id)
+            await send_reply(msg, welcome)
+            return
+
+        if text_normalized in ("help", "/help"):
+            await send_reply(
+                msg,
+                "Here are some things you can ask me:\n\n"
+                "• How many pending tasks are there?\n"
+                "• Show tasks assigned to [name]\n"
+                "• What is the email of [name]?\n"
+                "• Count of tasks by department\n"
+                "• List all employees\n\n"
+                "Just type your question naturally!",
+            )
             return
 
         if await is_off_topic(msg.text):
             await send_reply(
                 msg,
-                "I'm Botivate Bot — I can only help you query your business data. "
-                "Try asking about tasks, meetings, deliveries, or your team.",
+                "I can only help with your business data. Try questions like:\n\n"
+                "• How many pending tasks?\n"
+                "• Show tasks assigned to [name]\n"
+                "• What is [person]'s email?\n"
+                "• Count of records by department",
             )
             return
 

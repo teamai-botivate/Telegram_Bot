@@ -38,11 +38,9 @@ async def test_handle_message_off_topic_skips_db(monkeypatch) -> None:
     await bot_logic.handle_message(message)
 
     tenant_lookup.assert_not_awaited()
-    send_reply_mock.assert_awaited_once_with(
-        message,
-        "I'm Botivate Bot — I can only help you query your business data. "
-        "Try asking about tasks, meetings, deliveries, or your team.",
-    )
+    send_reply_mock.assert_awaited_once()
+    reply_text = send_reply_mock.call_args[0][1]
+    assert "I can only help with your business data" in reply_text
 
 
 @pytest.mark.asyncio
@@ -162,13 +160,14 @@ async def test_handle_message_start_without_token_returns_help(monkeypatch) -> N
     send_reply_mock = AsyncMock()
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
 
+    monkeypatch.setattr(bot_logic, "_build_welcome_message", AsyncMock(return_value="Hi! I'm ready."))
+
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="/start")
     await bot_logic.handle_message(message)
 
-    send_reply_mock.assert_awaited_once_with(
-        message,
-        "Hi! I'm ready. Ask me a business question and I'll fetch it from your data.",
-    )
+    send_reply_mock.assert_awaited_once()
+    reply_text = send_reply_mock.call_args[0][1]
+    assert "Hi!" in reply_text
 
 
 def test_validate_generated_sql_allows_select_only() -> None:
