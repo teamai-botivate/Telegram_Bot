@@ -352,49 +352,39 @@ async def _plan_query(
     else:
         hints_section = "No auto-inferred schema rules available."
 
-    plan_prompt = f"""You are an expert database analyst. Read the user's question
-and the database schema carefully, then produce a STRUCTURED QUERY PLAN.
-Do NOT write any SQL. Only output the plan.
+    plan_prompt = f"""Analyze the question and schema. Output a QUERY PLAN only — no SQL.
 
-━━━ DATABASE SCHEMA ━━━
+SCHEMA:
 {schema_blueprint}
 
-━━━ SCHEMA RULES ━━━
+RULES:
 {hints_section}
 
-━━━ PLANNING RULES ━━━
-1. ONLY reference tables and columns that EXIST in the schema above.
-   Read the column list for each table carefully before choosing.
-2. Never invent or guess table/column names. If unsure, pick the
-   closest matching column from the schema.
-3. STATUS / PENDING logic (choose the RIGHT strategy):
-   a) If the schema has a text column with sample values like
-      'pending', 'completed', 'not started' → filter by that column
-   b) If the schema rules have Status hint lines saying
-      "column IS NULL = pending" → use IS NULL on that date column
-   c) Never assume — always check what columns and values exist
-4. For boolean columns → plan TRUE/FALSE filters, never text
-5. For name/text searches → plan ILIKE '%value%' filters
-6. For "how many" / "count" questions → plan COUNT(*) aggregation
-7. For "list" / "show" / "what are" questions → plan to SELECT
-   the most useful columns (ID, name/description, status, date)
-8. Ignore tables starting with "extensions." or "pg_"
-9. If user mentions a person's name, search across ALL name-like
-   columns (name, user_name, given_by, assigned_to, etc.)
+QUESTION: {question}
 
-━━━ USER QUESTION ━━━
-{question}
+PLANNING INSTRUCTIONS:
+1. DISTINCT: If the question asks "how many people/employees/workers"
+   or "list/name the people" — use COUNT(DISTINCT column) or
+   SELECT DISTINCT. A table may have many rows per person.
+2. Only use tables and columns that EXIST in the schema above.
+3. PENDING/STATUS: Look at the schema sample values.
+   - If a column has values like 'pending','completed','not started'
+     → filter by that text column
+   - If schema rules say "column IS NULL = pending"
+     → use IS NULL on that date column
+4. For name searches → ILIKE '%value%'
+5. For boolean columns → TRUE/FALSE, never text
+6. Ignore tables starting with "extensions." or "pg_"
 
-━━━ OUTPUT FORMAT (strictly follow this) ━━━
-TABLES: [comma-separated list of tables to query]
-COLUMNS: [comma-separated list of columns to SELECT]
-FILTERS: [each WHERE condition on its own line, using exact column names]
-JOINS: [each JOIN with exact column names, or "none"]
-AGGREGATION: [COUNT/SUM/AVG with column, or "none"]
-ORDER: [ORDER BY clause, or "none"]
-LIMIT: [number, or "50" if not specified by user]
-REASONING: [1-2 sentences explaining WHY you chose these tables/filters]
-""".strip()
+OUTPUT FORMAT:
+TABLES: [tables to query]
+COLUMNS: [columns to SELECT — use DISTINCT if asking for unique values]
+FILTERS: [WHERE conditions with exact column names]
+JOINS: [JOIN conditions, or "none"]
+AGGREGATION: [COUNT/SUM/AVG, use DISTINCT if counting unique, or "none"]
+ORDER: [ORDER BY, or "none"]
+LIMIT: [number or 50]
+REASONING: [1 sentence: why these tables and columns]""".strip()
 
     plan = await _call_openai_sql(plan_prompt, f"Create a query plan for: {question}")
     logger.info("[SQL_PLAN] %s", plan.replace("\n", " | "))
@@ -427,51 +417,33 @@ async def generate_sql_query(
     else:
         hints_section = "No auto-inferred schema rules available."
 
-    system_prompt = f"""You are an expert PostgreSQL query writer. Convert the
-QUERY PLAN below into a single, correct SQL SELECT query.
+    system_prompt = f"""Convert this QUERY PLAN into a PostgreSQL SELECT query.
+Output ONLY raw SQL. No markdown, no backticks, no explanation, no semicolon.
 
-━━━ QUERY PLAN (from analysis step) ━━━
+PLAN:
 {plan}
 
-━━━ DATABASE SCHEMA ━━━
+SCHEMA:
 {schema_blueprint}
 
-━━━ TABLE ALIASES ━━━
-{dynamic_aliases}
+TABLE ALIASES: {dynamic_aliases}
 
-━━━ SCHEMA RULES ━━━
+RULES:
 {hints_section}
 
-━━━ SQL RULES ━━━
-- Output ONLY the raw SQL query — no markdown, no backticks, no explanation
-- No semicolon at the end
-- Only SELECT statements
-- Always declare aliases with AS: FROM table_name AS alias
+SQL REQUIREMENTS:
+- If the plan says DISTINCT, you MUST use DISTINCT in the SQL
+- Declare aliases: FROM table AS alias
 - Never use SELECT * — list columns explicitly
-- Use ILIKE for text searches (only on text/varchar columns)
-- For boolean columns use = TRUE or = FALSE
-- For nullable date/timestamp columns use IS NULL or IS NOT NULL
-- Prefer LEFT JOIN over INNER JOIN
-- If a column is not in the schema, do NOT invent it
-- For UNION ALL, cast all columns to ::text
-- Use CURRENT_DATE for today's date
-- For month queries use EXTRACT(MONTH FROM col)
+- ILIKE for text searches, = TRUE/FALSE for booleans
+- IS NULL / IS NOT NULL for nullable dates
+- LEFT JOIN preferred over INNER JOIN
+- Only use columns that exist in the schema
+- LIMIT must be included
+- For UNION ALL, cast columns to ::text
 
-━━━ VALIDATION SELF-CHECK ━━━
-Before writing the final query, verify:
-1. Every table and column exists in the schema above
-2. The plan's FILTERS match the SQL WHERE clause
-3. JOINs use correct columns from the schema
-4. LIMIT is included
-
-━━━ ORIGINAL QUESTION ━━━
-{question}
-
-━━━ ENTITIES ━━━
-{entities_json}
-
-Write the SQL query now:
-""".strip()
+QUESTION: {question}
+ENTITIES: {entities_json}""".strip()
 
     user_prompt = f"Generate the SQL query for: {question}"
     raw_sql = await _call_openai_sql(system_prompt, user_prompt)
@@ -512,70 +484,33 @@ async def format_sql_response(company_name: str, question: str, sql_results: lis
     total_rows = len(sql_results)
     display_rows = sql_results[:10]
 
-    system_prompt = f"""LANGUAGE — ABSOLUTE RULE (READ THIS FIRST):
-You MUST reply ONLY in English. If the data contains Hindi or other
-language words, translate them to English in your reply.
+    system_prompt = f"""Reply in English only. Plain text only — no markdown,
+no **bold**, no | tables |. Keep it short (3-8 lines max).
 
-You are a friendly business assistant for {company_name}.
-Format the answer for a WhatsApp/Telegram chat message.
-
-CONTEXT:
-- User asked: "{question}"
-- Total rows returned: {total_rows}
-- Data shown below: first {len(display_rows)} rows
-
-━━━ FORMATTING RULES ━━━
-- Plain text only. No markdown, no **bold**, no __underline__
-- No | table | format |, no --- dividers
-- Use emoji sparingly (1-2 max) for visual clarity
-- Keep reply concise: aim for 3-8 lines
-
-━━━ RESPONSE PATTERNS ━━━
-
-IF the data has a single COUNT number:
-  Just state it naturally: "There are 835 pending tasks."
-  Do NOT say "Showing X of Y counts" — that's confusing.
-
-IF the data has multiple COUNT rows (grouped):
-  List each group:
-  [Group name]: [count]
-  [Group name]: [count]
-  Total: [sum]
-
-IF the data is a list of records:
-  Show the most important 2-3 fields per record.
-  Skip fields that are all the same value (e.g., if every row has
-  department='HR', mention it once at the top, not per row).
-  Format:
-  1. [Main identifier] - [key detail]
-  2. [Main identifier] - [key detail]
-  ...
-  If total > {len(display_rows)}: "Showing {len(display_rows)} of {total_rows}. Ask me to filter by name, date, or status."
-
-IF the data is a single record:
-  List each field on its own line:
-  [Field]: [Value]
-
-IF the data is empty:
-  "No records found matching your query."
-
-━━━ IMPORTANT ━━━
-- Answer the user's actual question directly first
-- Then show supporting data if needed
-- End with a brief follow-up suggestion when helpful
-  (e.g., "Need details for a specific person? Just ask!")
-
-Data:
+You are {company_name}'s data assistant. The user asked: "{question}"
+{total_rows} rows returned. Data (first {len(display_rows)}):
 {json.dumps(display_rows, default=str)}
 
-Reply:"""
+HOW TO RESPOND:
+- Single count → state it: "There are 835 pending tasks."
+- Multiple counts → list each: "HR: 45, IT: 23, Production: 12"
+- List of names → list them: "Deepak, Am Sir, Rahul Sir"
+- Record details → show 2-3 key fields per record, numbered
+- If total > {len(display_rows)} → add: "Showing {len(display_rows)} of {total_rows}."
+
+AVOID:
+- Never say "Showing X of Y counts" for a single number
+- Don't repeat identical values for every row — mention once
+- Don't add unnecessary filler like "Need details? Just ask!"
+  unless it genuinely helps
+- If data has non-English words, translate them to English"""
 
     reply = await _call_mistral(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Answer this: {question}"},
+            {"role": "user", "content": question},
         ],
-        max_tokens=600,
+        max_tokens=500,
         model=RESPONSE_FORMAT_MODEL,
     )
     return reply
