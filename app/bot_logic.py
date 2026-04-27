@@ -373,19 +373,18 @@ PLANNING INSTRUCTIONS:
    - If schema rules say "column IS NULL = pending"
      → use IS NULL on that date column
 4. PERSON NAME EXTRACTION (CRITICAL):
-   - If the question mentions a person's name (e.g., "tasks of Deepak",
-     "assigned to Am Sir", "work given by Vikas"), you MUST add a
-     WHERE filter for that name using ILIKE on the appropriate column
-     (name, user_name, given_by, assigned_to — check schema).
-   - "tasks of Deepak" → FILTER: name ILIKE '%Deepak%'
-   - "given by Vikas" → FILTER: given_by ILIKE '%Vikas%'
-   - If MULTIPLE names: "tasks of Deepak and Am Sir"
-     → FILTER: name ILIKE '%Deepak%' OR name ILIKE '%Am Sir%'
-   - NEVER ignore a person's name in the question.
+   - If the question mentions a person's name, you MUST add a
+     WHERE filter using ILIKE on the appropriate name column
+     from the schema (look for columns like name, user_name,
+     given_by, assigned_to, employee_name, etc.).
+   - Example: "records of [person]" → FILTER: [name_column] ILIKE '%[person]%'
+   - Example: "given by [person]" → FILTER: [giver_column] ILIKE '%[person]%'
+   - If MULTIPLE names are mentioned, use OR between conditions.
+   - NEVER ignore a person's name mentioned in the question.
 5. For boolean columns → TRUE/FALSE, never text
 6. Ignore tables starting with "extensions." or "pg_"
-7. MULTI-TABLE: If the question says "from checklist AND delegation",
-   query BOTH tables separately with UNION ALL.
+7. MULTI-TABLE: If the question asks about multiple tables,
+   query each table separately with UNION ALL.
 
 OUTPUT FORMAT:
 TABLES: [tables to query]
@@ -505,7 +504,7 @@ You are {company_name}'s data assistant. The user asked: "{question}"
 HOW TO RESPOND:
 - Single count → state it: "There are 835 pending tasks."
 - Multiple counts → list each: "HR: 45, IT: 23, Production: 12"
-- List of names → list them: "Deepak, Am Sir, Rahul Sir"
+- List of names → list them comma-separated
 - Record details → show 2-3 key fields per record, numbered
 - If total > {len(display_rows)} → add: "Showing {len(display_rows)} of {total_rows}."
 
