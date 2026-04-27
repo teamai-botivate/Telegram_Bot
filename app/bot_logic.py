@@ -135,6 +135,68 @@ def _extract_entities(question: str) -> dict[str, Any]:
     }
 
 
+def _extract_name_filters(question: str, auto_schema_hints: str | None) -> str:
+    """Match person names from the question against the tenant's actual data values.
+
+    Parses 'Allowed values for <column>: [values]' lines from auto_schema_hints,
+    checks which values appear in the question, and returns ready-to-use
+    filter instructions the LLM cannot ignore.
+
+    Works with ANY tenant database — reads from their own hints.
+    """
+    if not auto_schema_hints:
+        return ""
+
+    # Parse "Allowed values for <column>: ['val1', 'val2']" lines
+    name_columns = {}  # {column_name: [values]}
+    for line in auto_schema_hints.split("\n"):
+        match = re.match(
+            r"Allowed values for (\w+):\s*\[(.+)\]", line.strip()
+        )
+        if not match:
+            continue
+        col_name = match.group(1).lower()
+        # Only check name-like columns
+        if not any(kw in col_name for kw in ("name", "given_by", "assigned", "user_name", "employee", "worker")):
+            continue
+        # Parse the values list
+        raw_values = match.group(2)
+        values = [v.strip().strip("'\"") for v in raw_values.split(",")]
+        values = [v for v in values if v and len(v) > 1]
+        name_columns[match.group(1)] = values
+
+    if not name_columns:
+        return ""
+
+    # Match question against known values (case-insensitive, longest first)
+    question_lower = question.lower()
+    found_filters: list[str] = []
+
+    for col_name, values in name_columns.items():
+        # Sort by length descending so "Am Sir" matches before "Am"
+        for val in sorted(values, key=len, reverse=True):
+            if val.lower() in question_lower:
+                found_filters.append(f"{col_name} ILIKE '%{val}%'")
+
+    if not found_filters:
+        return ""
+
+    # Deduplicate
+    seen = set()
+    unique_filters = []
+    for f in found_filters:
+        if f.lower() not in seen:
+            seen.add(f.lower())
+            unique_filters.append(f)
+
+    filter_text = " OR ".join(unique_filters)
+    return (
+        f"\nPERSON FILTER (MANDATORY — the user mentioned specific people):\n"
+        f"You MUST include this WHERE condition: {filter_text}\n"
+        f"Do NOT omit this filter. The user is asking about specific people.\n"
+    )
+
+
 def _asks_for_everything(question: str) -> bool:
     return bool(re.search(r"\b(all|everything|entire|whole|complete)\b", question, flags=re.IGNORECASE))
 
@@ -352,6 +414,9 @@ async def _plan_query(
     else:
         hints_section = "No auto-inferred schema rules available."
 
+    # Pre-compute person name filters from the tenant's own data values
+    person_filter = _extract_name_filters(question, auto_schema_hints)
+
     plan_prompt = f"""Analyze the question and schema. Output a QUERY PLAN only — no SQL.
 
 SCHEMA:
@@ -359,7 +424,7 @@ SCHEMA:
 
 RULES:
 {hints_section}
-
+{person_filter}
 QUESTION: {question}
 
 PLANNING INSTRUCTIONS:
@@ -372,15 +437,8 @@ PLANNING INSTRUCTIONS:
      → filter by that text column
    - If schema rules say "column IS NULL = pending"
      → use IS NULL on that date column
-4. PERSON NAME EXTRACTION (CRITICAL):
-   - If the question mentions a person's name, you MUST add a
-     WHERE filter using ILIKE on the appropriate name column
-     from the schema (look for columns like name, user_name,
-     given_by, assigned_to, employee_name, etc.).
-   - Example: "records of [person]" → FILTER: [name_column] ILIKE '%[person]%'
-   - Example: "given by [person]" → FILTER: [giver_column] ILIKE '%[person]%'
-   - If MULTIPLE names are mentioned, use OR between conditions.
-   - NEVER ignore a person's name mentioned in the question.
+4. If a PERSON FILTER section appears above, you MUST include
+   those exact WHERE conditions in your FILTERS output.
 5. For boolean columns → TRUE/FALSE, never text
 6. Ignore tables starting with "extensions." or "pg_"
 7. MULTI-TABLE: If the question asks about multiple tables,
@@ -389,7 +447,7 @@ PLANNING INSTRUCTIONS:
 OUTPUT FORMAT:
 TABLES: [tables to query]
 COLUMNS: [columns to SELECT — use DISTINCT if asking for unique values]
-FILTERS: [WHERE conditions with exact column names — MUST include person name if mentioned]
+FILTERS: [WHERE conditions — MUST include PERSON FILTER if present above]
 JOINS: [JOIN conditions, or "none"]
 AGGREGATION: [COUNT/SUM/AVG, use DISTINCT if counting unique, or "none"]
 ORDER: [ORDER BY, or "none"]
@@ -421,6 +479,7 @@ async def generate_sql_query(
     entities = _extract_entities(question)
     entities_json = json.dumps(entities, default=str)
     dynamic_aliases = build_table_aliases(schema_blueprint)
+    person_filter = _extract_name_filters(question, auto_schema_hints)
 
     if auto_schema_hints and auto_schema_hints.strip():
         hints_section = auto_schema_hints.strip()
@@ -440,9 +499,11 @@ TABLE ALIASES: {dynamic_aliases}
 
 RULES:
 {hints_section}
-
+{person_filter}
 SQL REQUIREMENTS:
 - If the plan says DISTINCT, you MUST use DISTINCT in the SQL
+- If a PERSON FILTER section appears above, you MUST include
+  those exact WHERE conditions in the SQL
 - Declare aliases: FROM table AS alias
 - Never use SELECT * — list columns explicitly
 - ILIKE for text searches, = TRUE/FALSE for booleans
