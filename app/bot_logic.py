@@ -372,14 +372,25 @@ PLANNING INSTRUCTIONS:
      → filter by that text column
    - If schema rules say "column IS NULL = pending"
      → use IS NULL on that date column
-4. For name searches → ILIKE '%value%'
+4. PERSON NAME EXTRACTION (CRITICAL):
+   - If the question mentions a person's name (e.g., "tasks of Deepak",
+     "assigned to Am Sir", "work given by Vikas"), you MUST add a
+     WHERE filter for that name using ILIKE on the appropriate column
+     (name, user_name, given_by, assigned_to — check schema).
+   - "tasks of Deepak" → FILTER: name ILIKE '%Deepak%'
+   - "given by Vikas" → FILTER: given_by ILIKE '%Vikas%'
+   - If MULTIPLE names: "tasks of Deepak and Am Sir"
+     → FILTER: name ILIKE '%Deepak%' OR name ILIKE '%Am Sir%'
+   - NEVER ignore a person's name in the question.
 5. For boolean columns → TRUE/FALSE, never text
 6. Ignore tables starting with "extensions." or "pg_"
+7. MULTI-TABLE: If the question says "from checklist AND delegation",
+   query BOTH tables separately with UNION ALL.
 
 OUTPUT FORMAT:
 TABLES: [tables to query]
 COLUMNS: [columns to SELECT — use DISTINCT if asking for unique values]
-FILTERS: [WHERE conditions with exact column names]
+FILTERS: [WHERE conditions with exact column names — MUST include person name if mentioned]
 JOINS: [JOIN conditions, or "none"]
 AGGREGATION: [COUNT/SUM/AVG, use DISTINCT if counting unique, or "none"]
 ORDER: [ORDER BY, or "none"]
