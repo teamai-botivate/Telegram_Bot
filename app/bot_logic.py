@@ -966,7 +966,7 @@ async def handle_message(msg: BotMessage) -> None:
 
         if credentials.db_type.lower() == "google_sheets":
             from cryptography.fernet import InvalidToken
-            from .database import _decrypt_credential_value, fetch_google_sheet_data
+            from .database import _decrypt_credential_value, fetch_google_sheet_runtime_context
 
             try:
                 decrypted_url = _decrypt_credential_value(credentials.connection_url)
@@ -981,20 +981,24 @@ async def handle_message(msg: BotMessage) -> None:
                 return
 
             try:
-                blueprint, gs_hints = fetch_google_sheet_data(sheet_id, creds_json)
+                live_context, gs_hints = fetch_google_sheet_runtime_context(sheet_id, creds_json)
             except Exception as e:
                 logger.error("Google Sheets fetch failed: %s", e)
                 await send_reply(msg, "I couldn't access your Google Sheet right now. Please try again.")
                 return
 
             sheet_filters = _extract_sheet_value_filters(msg.text, gs_hints)
+            metadata_blueprint = credentials.schema_blueprint or "No metadata analysis is stored for this Google Sheet yet."
 
             system_prompt = f"""You are {tenant.company_name}'s Google Sheets data analyst.
-Answer using ONLY the GOOGLE SHEETS CONTEXT below.
+Answer using ONLY the GOOGLE SHEETS METADATA and LIVE DATA below.
 Plain text only. No markdown, no bold, no tables. Keep it short: 3-8 lines.
 
-GOOGLE SHEETS CONTEXT:
-{blueprint}
+GOOGLE SHEETS METADATA (metadata_analysis.json):
+{metadata_blueprint}
+
+LIVE GOOGLE SHEETS DATA:
+{live_context}
 
 RULES AND SEMANTIC HINTS:
 {gs_hints}

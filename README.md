@@ -121,6 +121,7 @@ Replace only the API call block at that marker (request URL, headers, and payloa
 - Reply formatting uses OpenAI Chat Completions (`RESPONSE_FORMAT_MODEL`, default `gpt-5.2`).
 - Off-topic classification still uses Mistral (`MISTRAL_CLASSIFIER_MODEL`, default `mistral-large-2512`).
 - Tenant-specific schema blueprint is stored in `tenant_db_credentials.schema_blueprint`.
+- For Google Sheets tenants, `schema_blueprint` stores only `metadata_analysis.json`-style semantic metadata. Live sheet rows are fetched at message time and are not saved into `schema_blueprint`.
 - Schema blueprint can be refreshed on demand with:
 	- `POST /admin/tenant/{tenant_id}/refresh-schema`
 - SQL execution includes self-healing retry logic:
