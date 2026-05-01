@@ -23,6 +23,7 @@ DEFAULT_POSTGRES_RUNTIME_SCHEMA = (
 
 @pytest.fixture(autouse=True)
 def mock_postgres_runtime_schema(monkeypatch) -> None:
+    bot_logic._conversation_context.clear()
     monkeypatch.setattr(
         bot_logic,
         "fetch_tenant_postgres_runtime_schema",
@@ -91,6 +92,9 @@ async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) 
     await bot_logic.handle_message(message)
 
     send_reply_mock.assert_awaited_once_with(message, "Your order is dispatched.")
+    history = bot_logic._conversation_context[f"{message.platform.value}:{message.chat_id}"]
+    assert history[-1]["question"] == "What is my order status?"
+    assert history[-1]["sql"] == "SELECT id, status FROM orders LIMIT 10"
 
 
 @pytest.mark.asyncio
@@ -300,6 +304,23 @@ async def test_generate_sql_query_uses_sql_generation_model(monkeypatch) -> None
     sql = await bot_logic.generate_sql_query("Demo Corp", "Table orders(id int)", "show orders")
 
     assert sql == "SELECT id FROM orders LIMIT 50"
+
+
+@pytest.mark.asyncio
+async def test_generate_sql_query_includes_conversation_context(monkeypatch) -> None:
+    call_mock = AsyncMock(return_value="SELECT task_id FROM delegation LIMIT 50")
+    monkeypatch.setattr(bot_logic, "_call_openai_sql", call_mock)
+
+    await bot_logic.generate_sql_query(
+        "Demo Corp",
+        DEFAULT_POSTGRES_RUNTIME_SCHEMA,
+        "Task in delegation?",
+        conversation_context_block="RECENT CHAT CONTEXT: previous question was about pending delegation tasks",
+    )
+
+    combined_prompts = "\n".join(call.args[0] for call in call_mock.await_args_list)
+    assert "RECENT CHAT CONTEXT" in combined_prompts
+    assert "preserve those constraints" in combined_prompts
 
 
 @pytest.mark.asyncio

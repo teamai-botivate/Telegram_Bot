@@ -50,6 +50,8 @@ DATABASE_CONNECTION_MESSAGE = (
 )
 
 _openai_client: AsyncOpenAI | None = None
+_conversation_context: dict[str, list[dict[str, Any]]] = {}
+MAX_CONVERSATION_CONTEXT_ITEMS = 3
 
 
 def _get_openai_client() -> AsyncOpenAI:
@@ -138,6 +140,48 @@ def _strip_code_fences(text: str) -> str:
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
     return cleaned
+
+
+def _context_key(msg: BotMessage) -> str:
+    return f"{msg.platform.value}:{msg.chat_id}"
+
+
+def _build_conversation_context_block(msg: BotMessage) -> str:
+    history = _conversation_context.get(_context_key(msg), [])
+    if not history:
+        return ""
+
+    lines = ["RECENT CHAT CONTEXT (use only when the current question is a follow-up):"]
+    for index, item in enumerate(history[-MAX_CONVERSATION_CONTEXT_ITEMS:], start=1):
+        lines.append(f"{index}. User: {item.get('question', '')}")
+        if item.get("sql"):
+            lines.append(f"   SQL: {item['sql']}")
+        if item.get("reply"):
+            lines.append(f"   Assistant: {item['reply']}")
+    lines.append(
+        "If the current question is short or elliptical, inherit relevant table/filter/status constraints from this context. "
+        "If the current question clearly changes scope, follow the current question."
+    )
+    return "\n".join(lines)
+
+
+def _remember_conversation_context(
+    msg: BotMessage,
+    question: str,
+    reply: str,
+    sql: str | None = None,
+) -> None:
+    key = _context_key(msg)
+    history = _conversation_context.setdefault(key, [])
+    history.append(
+        {
+            "question": question,
+            "reply": reply,
+            "sql": sql,
+            "stored_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    del history[:-MAX_CONVERSATION_CONTEXT_ITEMS]
 
 
 def _extract_entities(question: str) -> dict[str, Any]:
@@ -524,6 +568,7 @@ async def _plan_query(
     question: str,
     auto_schema_hints: str | None = None,
     similar_questions_block: str = "",
+    conversation_context_block: str = "",
 ) -> str:
     """Step 1 of Chain-of-Thought: Analyze the schema and produce a structured
     query plan WITHOUT writing any SQL. Works with any tenant schema."""
@@ -540,6 +585,7 @@ async def _plan_query(
 SCHEMA:
 {schema_blueprint}
 {similar_questions_block}
+{conversation_context_block}
 RULES:
 {hints_section}
 {person_filter}
@@ -561,6 +607,14 @@ PLANNING INSTRUCTIONS:
 6. Ignore tables starting with "extensions." or "pg_"
 7. MULTI-TABLE: If the question asks about multiple tables,
    query each table separately with UNION ALL.
+8. FOLLOW-UP QUESTIONS: If RECENT CHAT CONTEXT shows the user was asking
+   about pending/status/table filters and the current question is short
+   (for example "Task in delegation?"), preserve those constraints unless
+   the current question clearly changes them.
+9. COUNT + WHO/BY WHOM: If the user asks for a count and also asks who
+   gave/assigned/owns those records, GROUP BY the giver/assignee/owner
+   column and return one row per group. Do not collapse multiple people
+   into one arbitrary value.
 
 OUTPUT FORMAT:
 TABLES: [tables to query]
@@ -584,6 +638,7 @@ async def generate_sql_query(
     auto_schema_hints: str | None = None,
     tenant_id: Any = None,
     product_connection_id: Any = None,
+    conversation_context_block: str = "",
 ) -> str:
     """Two-step Chain-of-Thought SQL generation.
 
@@ -624,6 +679,7 @@ async def generate_sql_query(
         question,
         auto_schema_hints,
         similar_questions_block=similar_questions_block,
+        conversation_context_block=conversation_context_block,
     )
 
     # ── Step 2: Convert plan to SQL ──
@@ -647,6 +703,7 @@ SCHEMA:
 {schema_blueprint}
 
 {few_shot_block}TABLE ALIASES: {dynamic_aliases}
+{conversation_context_block}
 
 RULES:
 {hints_section}
@@ -663,6 +720,12 @@ SQL REQUIREMENTS:
 - Only use columns that exist in the schema
 - LIMIT must be included
 - For UNION ALL, cast columns to ::text
+- If the question asks for separate counts per table/category/person, return
+  those as separate named columns or rows with clear labels.
+- If the question asks "who gave/assigned/owns" along with a count, GROUP BY
+  the giver/assignee/owner column and include that column in SELECT.
+- For short follow-up questions, preserve relevant table/filter/status
+  constraints from RECENT CHAT CONTEXT unless the user clearly changes scope.
 
 QUESTION: {question}
 ENTITIES: {entities_json}""".strip()
@@ -875,6 +938,7 @@ async def handle_message(msg: BotMessage) -> None:
             return
 
         if credentials.db_type.lower() == "postgresql":
+            conversation_context_block = _build_conversation_context_block(msg)
             metadata_blueprint = credentials.schema_blueprint or "No semantic metadata available."
             try:
                 runtime_schema, runtime_hints = await fetch_tenant_postgres_runtime_schema(tenant.id)
@@ -932,6 +996,7 @@ async def handle_message(msg: BotMessage) -> None:
                         auto_schema_hints=auto_schema_hints,
                         tenant_id=tenant.id,
                         product_connection_id=None,
+                        conversation_context_block=conversation_context_block,
                     )
                     sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                     sql_query = _validate_generated_sql(sql_query)
@@ -999,6 +1064,7 @@ async def handle_message(msg: BotMessage) -> None:
             try:
                 reply = await format_sql_response(tenant.company_name, msg.text, query_rows)
                 await send_reply(msg, reply or "I couldn't generate a response from the returned records.")
+                _remember_conversation_context(msg, msg.text, reply or "", sql=_generated_sql)
             except Exception as fmt_error:
                 logger.error(f"[FORMAT_ERR] {fmt_error}")
                 await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
@@ -1021,6 +1087,7 @@ async def handle_message(msg: BotMessage) -> None:
         if credentials.db_type.lower() == "google_sheets":
             from cryptography.fernet import InvalidToken
             from .database import _decrypt_credential_value, fetch_google_sheet_runtime_context
+            conversation_context_block = _build_conversation_context_block(msg)
 
             try:
                 decrypted_url = _decrypt_credential_value(credentials.connection_url)
@@ -1054,6 +1121,7 @@ GOOGLE SHEETS METADATA (metadata_analysis.json):
 LIVE GOOGLE SHEETS DATA:
 {live_context}
 
+{conversation_context_block}
 RULES AND SEMANTIC HINTS:
 {gs_hints}
 {sheet_filters}
@@ -1091,6 +1159,7 @@ Reply in the exact same language as that question. Database values in other lang
 USER QUESTION: {msg.text}""".strip()
             reply = await _call_openai_formatting(system_prompt, msg.text, max_tokens=600)
             await send_reply(msg, reply or "I couldn't generate a response.")
+            _remember_conversation_context(msg, msg.text, reply or "")
             return
 
         await send_reply(msg, "Unsupported tenant data source configuration.")
