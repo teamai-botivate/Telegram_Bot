@@ -291,13 +291,12 @@ async def test_handle_message_expands_generic_count_query_across_tables(monkeypa
 @pytest.mark.asyncio
 async def test_format_sql_response_uses_response_format_model(monkeypatch) -> None:
     call_mock = AsyncMock(return_value="Here is your answer.")
-    monkeypatch.setattr(bot_logic, "_call_mistral", call_mock)
-    monkeypatch.setattr(bot_logic, "RESPONSE_FORMAT_MODEL", "mistral-small-latest")
+    monkeypatch.setattr(bot_logic, "_call_openai_formatting", call_mock)
 
     reply = await bot_logic.format_sql_response("Demo Corp", "show orders", [{"id": 1}])
 
     assert reply == "Here is your answer."
-    assert call_mock.await_args.kwargs["model"] == "mistral-small-latest"
+    assert call_mock.await_args.kwargs["max_tokens"] == 500
 
 
 @pytest.mark.asyncio

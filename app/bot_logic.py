@@ -35,9 +35,10 @@ logger = logging.getLogger(__name__)
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
-RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-large-2512")
+MISTRAL_CLASSIFIER_MODEL = os.getenv("MISTRAL_CLASSIFIER_MODEL", "mistral-large-2512")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-4o")
+SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-5.2")
+RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "gpt-5.2")
 ENABLE_QUERY_LEARNING = os.getenv("ENABLE_QUERY_LEARNING", "true").strip().lower() == "true"
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
@@ -105,6 +106,21 @@ async def _call_openai_sql(system_prompt: str, user_prompt: str) -> str:
     completion = await client.chat.completions.create(
         model=SQL_GENERATION_MODEL,
         temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    content = completion.choices[0].message.content
+    return (content or "").strip()
+
+
+async def _call_openai_formatting(system_prompt: str, user_prompt: str, max_tokens: int = 600) -> str:
+    client = _get_openai_client()
+    completion = await client.chat.completions.create(
+        model=RESPONSE_FORMAT_MODEL,
+        temperature=0,
+        max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -289,7 +305,7 @@ async def is_off_topic(text: str) -> bool:
         answer = await _call_mistral(
             [{"role": "user", "content": prompt}],
             max_tokens=5,
-            model=RESPONSE_FORMAT_MODEL,
+            model=MISTRAL_CLASSIFIER_MODEL,
         )
     except Exception as exc:
         logger.warning("Off-topic detection failed open: %s", exc)
@@ -675,15 +691,7 @@ AVOID:
   unless it genuinely helps
 - If data has non-English words, translate them to English"""
 
-    reply = await _call_mistral(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ],
-        max_tokens=500,
-        model=RESPONSE_FORMAT_MODEL,
-    )
-    return reply
+    return await _call_openai_formatting(system_prompt, question, max_tokens=500)
 
 
 def _validate_generated_sql(sql: str) -> str:
@@ -1013,14 +1021,7 @@ Look at this exact user question: "{msg.text}"
 Reply in the exact same language as that question. Database values in other languages must NOT influence your reply language.
 
 USER QUESTION: {msg.text}""".strip()
-            reply = await _call_mistral(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": msg.text},
-                ],
-                max_tokens=600,
-                model=RESPONSE_FORMAT_MODEL,
-            )
+            reply = await _call_openai_formatting(system_prompt, msg.text, max_tokens=600)
             await send_reply(msg, reply or "I couldn't generate a response.")
             return
 

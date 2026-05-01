@@ -67,7 +67,7 @@ These endpoints are protected by header x-admin-token with ADMIN_SECRET_TOKEN va
 
 1. Create a new Web Service in Render and connect this repository.
 2. Set these environment variables in the Render dashboard:
-	DATABASE_URL, FERNET_SECRET_KEY, ADMIN_SECRET_TOKEN, TELEGRAM_BOT_TOKEN, MISTRAL_API_KEY, OPENAI_API_KEY, SQL_GENERATION_MODEL, RESPONSE_FORMAT_MODEL, SQL_DEFAULT_ROW_LIMIT, SQL_FULL_ROW_LIMIT
+	DATABASE_URL, FERNET_SECRET_KEY, ADMIN_SECRET_TOKEN, TELEGRAM_BOT_TOKEN, MISTRAL_API_KEY, MISTRAL_CLASSIFIER_MODEL, OPENAI_API_KEY, SQL_GENERATION_MODEL, RESPONSE_FORMAT_MODEL, SQL_DEFAULT_ROW_LIMIT, SQL_FULL_ROW_LIMIT
 
 	When ready to enable WhatsApp, also set:
 	WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_BUSINESS_ACCOUNT_ID, WEBHOOK_VERIFY_TOKEN
@@ -117,8 +117,9 @@ Replace only the API call block at that marker (request URL, headers, and payloa
 
 ## SQL Generation Pipeline
 
-- SQL generation uses OpenAI Chat Completions (`SQL_GENERATION_MODEL`, default `gpt-4o`).
-- Reply formatting uses Mistral (`RESPONSE_FORMAT_MODEL`, default `mistral-large-2512`).
+- SQL generation uses OpenAI Chat Completions (`SQL_GENERATION_MODEL`, default `gpt-5.2`).
+- Reply formatting uses OpenAI Chat Completions (`RESPONSE_FORMAT_MODEL`, default `gpt-5.2`).
+- Off-topic classification still uses Mistral (`MISTRAL_CLASSIFIER_MODEL`, default `mistral-large-2512`).
 - Tenant-specific schema blueprint is stored in `tenant_db_credentials.schema_blueprint`.
 - Schema blueprint can be refreshed on demand with:
 	- `POST /admin/tenant/{tenant_id}/refresh-schema`
