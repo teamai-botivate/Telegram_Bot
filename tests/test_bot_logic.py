@@ -300,6 +300,30 @@ async def test_format_sql_response_uses_response_format_model(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_openai_formatting_uses_max_completion_tokens(monkeypatch) -> None:
+    class FakeCompletions:
+        def __init__(self):
+            self.create = AsyncMock(
+                return_value=SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+                )
+            )
+
+    fake_completions = FakeCompletions()
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=fake_completions),
+    )
+    monkeypatch.setattr(bot_logic, "_get_openai_client", lambda: fake_client)
+
+    reply = await bot_logic._call_openai_formatting("system", "user", max_tokens=123)
+
+    assert reply == "ok"
+    call_kwargs = fake_completions.create.await_args.kwargs
+    assert call_kwargs["max_completion_tokens"] == 123
+    assert "max_tokens" not in call_kwargs
+
+
+@pytest.mark.asyncio
 async def test_handle_message_uses_fallback_rows_when_formatting_fails(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(

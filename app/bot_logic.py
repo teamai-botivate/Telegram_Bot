@@ -120,7 +120,7 @@ async def _call_openai_formatting(system_prompt: str, user_prompt: str, max_toke
     completion = await client.chat.completions.create(
         model=RESPONSE_FORMAT_MODEL,
         temperature=0,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
