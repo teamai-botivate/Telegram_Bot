@@ -240,6 +240,37 @@ def test_extract_sheet_value_filters_handles_headers_with_spaces() -> None:
     assert "HR" in filters
 
 
+def test_extract_sheet_value_filters_employee_named_does_not_apply_manager() -> None:
+    hints = (
+        "Allowed values for `Employee Name`: ['Arjun Bhatt', 'Nisha Rao'] - use exact match\n"
+        "Allowed values for `Manager`: ['Arjun Bhatt', 'HR Department'] - use exact match\n"
+    )
+
+    filters = bot_logic._extract_sheet_value_filters(
+        'Tell me about the employee named "Arjun Bhatt".',
+        hints,
+    )
+
+    assert "Employee Name" in filters
+    assert "Arjun Bhatt" in filters
+    assert "Manager" not in filters
+
+
+def test_extract_sheet_value_filters_allows_explicit_manager_lookup() -> None:
+    hints = (
+        "Allowed values for `Employee Name`: ['Arjun Bhatt', 'Nisha Rao'] - use exact match\n"
+        "Allowed values for `Manager`: ['Arjun Bhatt', 'HR Department'] - use exact match\n"
+    )
+
+    filters = bot_logic._extract_sheet_value_filters(
+        "Which employees have manager Arjun Bhatt?",
+        hints,
+    )
+
+    assert "Manager" in filters
+    assert "Arjun Bhatt" in filters
+
+
 @pytest.mark.asyncio
 async def test_generate_sql_query_uses_sql_generation_model(monkeypatch) -> None:
     call_mock = AsyncMock(return_value="SELECT id FROM orders LIMIT 50")

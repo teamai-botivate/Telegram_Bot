@@ -230,7 +230,20 @@ def _extract_sheet_value_filters(question: str, sheet_hints: str | None) -> str:
         return ""
 
     question_lower = question.lower()
+    explicit_employee_name_lookup = bool(
+        re.search(
+            r"\b(employee|person|worker|staff|user)\s+(?:named|called|name(?:d)?\s+is)\b",
+            question_lower,
+        )
+        or re.search(r"\bnamed\s+['\"]?[^'\"]+", question_lower)
+    )
     matched_filters: list[tuple[str, str]] = []
+
+    def _value_mentioned(value: str) -> bool:
+        value_lower = value.lower()
+        if len(value_lower) <= 3:
+            return bool(re.search(rf"(?<!\w){re.escape(value_lower)}(?!\w)", question_lower))
+        return value_lower in question_lower
 
     for line in sheet_hints.splitlines():
         match = re.match(
@@ -241,19 +254,41 @@ def _extract_sheet_value_filters(question: str, sheet_hints: str | None) -> str:
             continue
 
         column_name = match.group(1).strip()
-        lowered_column = column_name.lower()
-        if not any(
-            keyword in lowered_column
-            for keyword in ("name", "employee", "manager", "assigned", "given", "department", "status")
-        ):
-            continue
-
         raw_values = match.group(2)
         values = [value.strip().strip("'\"") for value in raw_values.split(",")]
-        for value in sorted((v for v in values if len(v) > 1), key=len, reverse=True):
-            if value.lower() in question_lower:
-                matched_filters.append((column_name, value))
-                break
+        mentioned_values = [value for value in values if len(value) > 1 and _value_mentioned(value)]
+
+        lowered_column = column_name.lower()
+        is_employee_name_column = (
+            "employee name" in lowered_column
+            or lowered_column in {"name", "full name", "person name", "staff name", "worker name", "user name"}
+        )
+        is_manager_column = "manager" in lowered_column
+        is_department_column = "department" in lowered_column
+        is_status_column = "status" in lowered_column
+        is_assignment_column = any(keyword in lowered_column for keyword in ("assigned", "given"))
+
+        if explicit_employee_name_lookup and not is_employee_name_column:
+            continue
+
+        if is_manager_column and "manager" not in question_lower and not re.search(r"\breports?\s+to\b", question_lower):
+            continue
+
+        if is_department_column and "department" not in question_lower and not mentioned_values:
+            continue
+
+        if is_status_column and "status" not in question_lower and not mentioned_values:
+            continue
+
+        if is_assignment_column and not any(keyword in question_lower for keyword in ("assigned", "given by", "given to")):
+            continue
+
+        if not any((is_employee_name_column, is_manager_column, is_department_column, is_status_column, is_assignment_column)):
+            continue
+
+        for value in sorted(mentioned_values, key=len, reverse=True):
+            matched_filters.append((column_name, value))
+            break
 
     if not matched_filters:
         return ""
@@ -1008,14 +1043,24 @@ ANSWERING RULES:
 - Use the FULL DATA SNAPSHOT rows as the source of truth for answers.
 - Sample rows are only examples of structure; do not answer from samples when full rows are available.
 - If the question names a sheet/tab, use that sheet first. Otherwise choose the sheet whose description and headers best match the question.
-- For person/employee questions, first filter rows by exact or case-insensitive name match in name-like columns.
+- For lookup questions like "record/person/customer/order named X", filter by the primary name/title/ID column for the selected sheet. Do not apply unrelated columns such as Manager/Owner/Department unless the user explicitly asks for that relationship or filter.
 - For counts, sums, averages, maximums, and minimums, calculate from the matching rows. Do not estimate.
 - For lookup questions, return the exact value from the matching row and the most relevant fields around it.
+- Format one matching record using the selected sheet's actual schema, not a hard-coded business template.
+- Field order for a record:
+  1. Primary identifier/name/title fields first, using primary_keys and column_descriptions from metadata when available.
+  2. Fields directly requested by the user.
+  3. important_columns from metadata, in the order they appear there.
+  4. Remaining useful fields in the same left-to-right order as the sheet headers.
+- Group related fields only when the schema clearly supports it; otherwise use compact "Column: value" lines.
+- For multiple records, number each record and keep the same schema-derived field order.
 - For pending/incomplete/not done, apply the Status/Pending hints. Use blank completion/submission dates only when the hint says blank means pending.
 - If a sheet says its data snapshot is truncated and the question needs all rows, say the exact answer needs a full snapshot instead of inventing a number.
 - If the answer is not present in the context, say you could not find it in the sheet.
 
 AVOID:
+- Never force employee/HR-specific labels onto other schemas.
+- Never mention filters that produced no match if another matching row exists through a better primary name/title/ID field.
 - Never say "Based on the data provided".
 - Never repeat every column name as a label on every row.
 - Never add filler like "Let me know if you need more!"
