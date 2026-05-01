@@ -24,6 +24,8 @@ from .database import (
     explain_validate_sql,
     get_tenant_by_chat_id,
     get_tenant_credentials,
+    retrieve_similar_examples,
+    store_query_example,
 )
 from .platforms.base import BotMessage, Platform, send_reply
 
@@ -36,6 +38,7 @@ MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
 RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "mistral-large-2512")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-4o")
+ENABLE_QUERY_LEARNING = os.getenv("ENABLE_QUERY_LEARNING", "true").strip().lower() == "true"
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
 RETRIEVAL_FAILURE_MESSAGE = "I wasn't able to retrieve that information right now. Please try rephrasing your question."
@@ -406,6 +409,7 @@ async def _plan_query(
     schema_blueprint: str,
     question: str,
     auto_schema_hints: str | None = None,
+    similar_questions_block: str = "",
 ) -> str:
     """Step 1 of Chain-of-Thought: Analyze the schema and produce a structured
     query plan WITHOUT writing any SQL. Works with any tenant schema."""
@@ -421,7 +425,7 @@ async def _plan_query(
 
 SCHEMA:
 {schema_blueprint}
-
+{similar_questions_block}
 RULES:
 {hints_section}
 {person_filter}
@@ -464,6 +468,8 @@ async def generate_sql_query(
     schema_blueprint: str,
     question: str,
     auto_schema_hints: str | None = None,
+    tenant_id: Any = None,
+    product_connection_id: Any = None,
 ) -> str:
     """Two-step Chain-of-Thought SQL generation.
 
@@ -472,8 +478,39 @@ async def generate_sql_query(
 
     Fully multi-tenant — uses the tenant's own schema_blueprint and hints.
     """
+    # ── Few-shot retrieval (best-effort; never raises) ──
+    examples: list[dict[str, Any]] = []
+    if tenant_id is not None:
+        try:
+            examples = await retrieve_similar_examples(
+                tenant_id, question, product_connection_id=product_connection_id, limit=5
+            )
+        except Exception as retrieval_error:
+            logger.warning("[FEW_SHOT] retrieval failed: %s", retrieval_error)
+            examples = []
+
+    top_sim = examples[0]["similarity"] if examples else 0
+    logger.info(f"[FEW_SHOT] retrieved={len(examples)} top_sim={top_sim:.3f}")
+
+    if examples:
+        few_shot_block = "EXAMPLES of past successful queries on this database (for reference, not copying):\n"
+        for ex in examples:
+            few_shot_block += f"Q: {ex['question']}\nSQL: {ex['sql']}\n\n"
+        few_shot_block = few_shot_block.rstrip() + "\n\nThese examples show patterns that worked before. Adapt them to the current question — do not copy verbatim if the question differs.\n"
+        similar_questions_block = "\nSIMILAR PAST QUESTIONS (for context):\n" + "\n".join(
+            f"- {ex['question']}" for ex in examples
+        ) + "\n"
+    else:
+        few_shot_block = ""
+        similar_questions_block = ""
+
     # ── Step 1: Generate a structured query plan ──
-    plan = await _plan_query(schema_blueprint, question, auto_schema_hints)
+    plan = await _plan_query(
+        schema_blueprint,
+        question,
+        auto_schema_hints,
+        similar_questions_block=similar_questions_block,
+    )
 
     # ── Step 2: Convert plan to SQL ──
     entities = _extract_entities(question)
@@ -495,7 +532,7 @@ PLAN:
 SCHEMA:
 {schema_blueprint}
 
-TABLE ALIASES: {dynamic_aliases}
+{few_shot_block}TABLE ALIASES: {dynamic_aliases}
 
 RULES:
 {hints_section}
@@ -734,6 +771,7 @@ async def handle_message(msg: BotMessage) -> None:
         if credentials.db_type.lower() == "postgresql":
             blueprint = credentials.schema_blueprint or "No schema available."
             query_rows: list[dict[str, Any]] = []
+            _generated_sql: str | None = None
 
             try:
                 if detect_multi_table_query(msg.text):
@@ -768,6 +806,8 @@ async def handle_message(msg: BotMessage) -> None:
                         blueprint,
                         msg.text,
                         auto_schema_hints=getattr(credentials, "auto_schema_hints", None),
+                        tenant_id=tenant.id,
+                        product_connection_id=None,
                     )
                     sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                     sql_query = _validate_generated_sql(sql_query)
@@ -785,10 +825,12 @@ async def handle_message(msg: BotMessage) -> None:
 
                     max_retries = 2
                     attempt = 0
+                    _explain_passed = is_valid
                     while True:
                         try:
                             query_rows = await execute_tenant_query(tenant.id, sql_query)
                             logger.info(f"[SQL_OK] rows_returned={len(query_rows)}")
+                            _generated_sql = sql_query
                             break
                         except TenantDBConnectionError as exec_error:
                             logger.error(f"[SQL_ERR] attempt={attempt + 1} error='{exec_error}'")
@@ -810,6 +852,16 @@ async def handle_message(msg: BotMessage) -> None:
                             sql_query = _validate_generated_sql(sql_query)
                             logger.info(f"[SQL_OUT] {sql_query}")
 
+                    # top_similarity value is in the preceding [FEW_SHOT] log line.
+                    logger.info(
+                        f"[QUERY_QUALITY] tenant={tenant.id} "
+                        f"few_shot_used={_generated_sql is not None} "
+                        f"top_similarity=see:[FEW_SHOT] "
+                        f"plan_to_sql_match={_explain_passed} "
+                        f"rows_returned={len(query_rows)} "
+                        f"retries={attempt}"
+                    )
+
             except Exception as sql_pipeline_error:
                 logger.exception("[SQL_PIPELINE] Unhandled error in SQL pipeline for tenant %s", tenant.id)
                 await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
@@ -826,6 +878,20 @@ async def handle_message(msg: BotMessage) -> None:
             except Exception as fmt_error:
                 logger.error(f"[FORMAT_ERR] {fmt_error}")
                 await send_reply(msg, RETRIEVAL_FAILURE_MESSAGE)
+                return
+
+            # ── AUTO-FEEDBACK: store successful query for future few-shot retrieval ──
+            if ENABLE_QUERY_LEARNING and _generated_sql is not None and query_rows:
+                try:
+                    await store_query_example(
+                        tenant_id=tenant.id,
+                        question=msg.text,
+                        sql=_generated_sql,
+                        product_connection_id=None,
+                        verified_by="auto",
+                    )
+                except Exception as store_error:
+                    logger.warning("[QUERY_LEARNING] Failed to store example: %s", store_error)
             return
 
         if credentials.db_type.lower() == "google_sheets":

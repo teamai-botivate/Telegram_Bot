@@ -3,7 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -52,3 +53,23 @@ class TenantDBCredential(Base):
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="credential")
+
+
+class TenantQueryExample(Base):
+    __tablename__ = "tenant_query_examples"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    product_connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    sql: Mapped[str] = mapped_column(Text, nullable=False)
+    question_embedding: Mapped[list[float]] = mapped_column(Vector(1536), nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    verified_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

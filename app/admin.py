@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any
 
 import jwt
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi import Query as FastAPIQuery
 from pydantic import BaseModel, Field
 
+from .bot_logic import _validate_generated_sql
 from .database import (
     create_tenant_record,
     execute_tenant_query,
@@ -17,6 +19,8 @@ from .database import (
     fetch_postgres_schema,
     refresh_schema_blueprint,
     save_tenant_credentials,
+    session_factory,
+    store_query_example,
 )
 
 load_dotenv()
@@ -232,3 +236,168 @@ async def test_tenant_query(
         return {"sql": q, "rows": rows, "error": None}
     except Exception as e:
         return {"sql": q, "rows": [], "error": str(e)}
+
+
+# ─── Example Management ───────────────────────────────────────────────────────
+
+
+class SeedExampleItem(BaseModel):
+    question: str = Field(min_length=1)
+    sql: str = Field(min_length=1)
+    product_connection_id: str | None = None
+
+
+class SeedExamplesRequest(BaseModel):
+    examples: list[SeedExampleItem]
+
+
+@router.post("/{tenant_id}/examples/seed")
+async def seed_tenant_examples(
+    tenant_id: str,
+    payload: SeedExamplesRequest,
+    _: None = Depends(verify_admin_token),
+) -> dict[str, Any]:
+    seeded = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for idx, item in enumerate(payload.examples):
+        label = f"examples[{idx}]"
+
+        try:
+            _validate_generated_sql(item.sql)
+        except ValueError as validation_error:
+            errors.append(f"{label}: invalid SQL — {validation_error}")
+            skipped += 1
+            continue
+
+        product_conn_id = None
+        if item.product_connection_id:
+            try:
+                product_conn_id = uuid.UUID(item.product_connection_id)
+            except ValueError:
+                errors.append(f"{label}: product_connection_id is not a valid UUID")
+                skipped += 1
+                continue
+
+        try:
+            result_id = await store_query_example(
+                tenant_id=tenant_id,
+                question=item.question,
+                sql=item.sql,
+                product_connection_id=product_conn_id,
+                verified_by="admin",
+            )
+        except Exception as store_error:
+            errors.append(f"{label}: store failed — {store_error}")
+            skipped += 1
+            continue
+
+        if result_id is None:
+            errors.append(f"{label}: store returned None (embedding may have failed)")
+            skipped += 1
+        else:
+            seeded += 1
+
+    return {"seeded": seeded, "skipped": skipped, "errors": errors}
+
+
+@router.get("/{tenant_id}/examples")
+async def list_tenant_examples(
+    tenant_id: str,
+    limit: int = FastAPIQuery(default=50, ge=1, le=500),
+    offset: int = FastAPIQuery(default=0, ge=0),
+    _: None = Depends(verify_admin_token),
+) -> dict[str, Any]:
+    if session_factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured.",
+        )
+
+    from sqlalchemy import text
+
+    query = text(
+        "SELECT id, tenant_id, product_connection_id, question, sql, "
+        "success_count, last_used_at, verified_by, created_at "
+        "FROM tenant_query_examples "
+        "WHERE tenant_id = :tenant_id "
+        "ORDER BY success_count DESC, last_used_at DESC "
+        "LIMIT :limit OFFSET :offset"
+    )
+    count_query = text(
+        "SELECT COUNT(*) FROM tenant_query_examples WHERE tenant_id = :tenant_id"
+    )
+
+    try:
+        tenant_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tenant_id is not a valid UUID.")
+
+    async with session_factory() as session:
+        total_result = await session.execute(count_query, {"tenant_id": tenant_uuid})
+        total = total_result.scalar_one()
+
+        rows_result = await session.execute(query, {"tenant_id": tenant_uuid, "limit": limit, "offset": offset})
+        rows = rows_result.mappings().all()
+
+    examples = [
+        {
+            "id": str(row["id"]),
+            "tenant_id": str(row["tenant_id"]),
+            "product_connection_id": str(row["product_connection_id"]) if row["product_connection_id"] else None,
+            "question": row["question"],
+            "sql": row["sql"],
+            "success_count": row["success_count"],
+            "last_used_at": row["last_used_at"].isoformat() if row["last_used_at"] else None,
+            "verified_by": row["verified_by"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+        for row in rows
+    ]
+
+    return {"total": total, "limit": limit, "offset": offset, "examples": examples}
+
+
+@router.delete("/{tenant_id}/examples/{example_id}")
+async def delete_tenant_example(
+    tenant_id: str,
+    example_id: str,
+    _: None = Depends(verify_admin_token),
+) -> dict[str, Any]:
+    if session_factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured.",
+        )
+
+    from sqlalchemy import text
+
+    try:
+        tenant_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tenant_id is not a valid UUID.")
+
+    try:
+        example_uuid = uuid.UUID(example_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="example_id is not a valid UUID.")
+
+    delete_stmt = text(
+        "DELETE FROM tenant_query_examples "
+        "WHERE id = :id AND tenant_id = :tenant_id "
+        "RETURNING id"
+    )
+
+    async with session_factory() as session:
+        result = await session.execute(delete_stmt, {"id": example_uuid, "tenant_id": tenant_uuid})
+        deleted_id = result.scalar_one_or_none()
+        await session.commit()
+
+    if deleted_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Example not found or does not belong to this tenant.",
+        )
+
+    return {"deleted": str(deleted_id)}
