@@ -9,6 +9,27 @@ from app.platforms.base import BotMessage, Platform
 from app.database import QueryExecutionError, TenantDBConnectionError
 
 
+DEFAULT_POSTGRES_RUNTIME_SCHEMA = (
+    "Table `orders`\n"
+    "Columns: id (uuid), status (text)\n\n"
+    "Table `calendar`\n"
+    "Columns: date (date), is_working (boolean)\n\n"
+    "Table `checklist`\n"
+    "Columns: task_id (int), given_by (text), task_description (text)\n\n"
+    "Table `delegation`\n"
+    "Columns: task_id (int), given_by (text), name (text)\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def mock_postgres_runtime_schema(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bot_logic,
+        "fetch_tenant_postgres_runtime_schema",
+        AsyncMock(return_value=(DEFAULT_POSTGRES_RUNTIME_SCHEMA, "Runtime hints")),
+    )
+
+
 @pytest.mark.asyncio
 async def test_handle_message_sends_account_not_found_when_tenant_missing(monkeypatch) -> None:
     send_reply_mock = AsyncMock()

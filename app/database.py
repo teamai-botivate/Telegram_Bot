@@ -470,7 +470,7 @@ async def update_tenant_chat_id(tenant_id: uuid.UUID | str, platform: str, chat_
 		await session.commit()
 
 
-async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
+async def fetch_postgres_runtime_schema(connection_string: str) -> tuple[str, str]:
 	connection: asyncpg.Connection | None = None
 	try:
 		# asyncpg doesn't understand sslmode= in URL; strip it and pass ssl= explicitly.
@@ -758,6 +758,131 @@ async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
 	finally:
 		if connection is not None:
 			await connection.close()
+
+
+POSTGRES_SCHEMA_ANALYZER_SYSTEM_PROMPT = """
+You are a Senior Database Architect and Business Analyst.
+Your goal is to reverse engineer the business logic and semantic meaning of a PostgreSQL schema.
+
+INPUT:
+A raw technical PostgreSQL schema report with tables, columns, relationships, sample values,
+status hints, boolean hints, and row-count estimates.
+
+TASK:
+Analyze the schema and output a detailed JSON object containing:
+1. "business_summary": A high-level description of what this database is for.
+2. "table_insights": A dictionary where keys are table names, containing:
+   - "description": What this table represents.
+   - "primary_keys": inferred primary keys.
+   - "foreign_keys": inferred relationships.
+   - "important_columns": columns that seem critical for analytics.
+   - "column_descriptions": a dictionary mapping each column name to inferred meaning.
+3. "suggested_semantic_schema": A concise text block documenting this database for a data assistant.
+
+OUTPUT FORMAT:
+Return ONLY valid JSON.
+""".strip()
+
+
+def _extract_postgres_tables_from_runtime_schema(runtime_schema: str) -> dict[str, list[str]]:
+	tables: dict[str, list[str]] = {}
+	for match in re.finditer(r"^Table `([^`]+)`[^\n]*\nColumns:\s*([^\n]+)", runtime_schema, flags=re.MULTILINE):
+		table_name = match.group(1)
+		columns_text = match.group(2)
+		columns = re.findall(r"([a-zA-Z_][\w]*)\s*\(", columns_text)
+		tables[table_name] = columns
+	return tables
+
+
+def _fallback_postgres_metadata(runtime_schema: str) -> dict[str, Any]:
+	tables = _extract_postgres_tables_from_runtime_schema(runtime_schema)
+	table_insights: dict[str, Any] = {}
+	for table_name, columns in tables.items():
+		primary_keys = [
+			column
+			for column in columns
+			if column.lower() == "id" or column.lower().endswith("_id")
+		][:2]
+		important_columns = [
+			column
+			for column in columns
+			if any(
+				keyword in column.lower()
+				for keyword in (
+					"id", "name", "status", "date", "time", "amount", "total",
+					"count", "email", "department", "assigned", "created", "updated",
+				)
+			)
+		][:12]
+		table_insights[table_name] = {
+			"description": f"Inferred PostgreSQL table for `{table_name}` records.",
+			"primary_keys": primary_keys,
+			"foreign_keys": [],
+			"important_columns": important_columns,
+			"column_descriptions": {
+				column: f"Inferred field from the `{table_name}` table."
+				for column in columns
+			},
+		}
+
+	table_names = ", ".join(f"'{table}'" for table in tables) or "no tables"
+	return {
+		"business_summary": f"This PostgreSQL database contains business data across {table_names}.",
+		"table_insights": table_insights,
+		"suggested_semantic_schema": (
+			f"The database contains these logical tables: {table_names}. "
+			"Use relationships, primary keys, important columns, and column descriptions to route user questions."
+		),
+	}
+
+
+def _analyze_postgres_schema(runtime_schema: str) -> dict[str, Any]:
+	api_key = os.getenv("OPENAI_API_KEY", "").strip()
+	if not api_key:
+		logger.warning("OPENAI_API_KEY not configured; using deterministic PostgreSQL metadata fallback.")
+		return _fallback_postgres_metadata(runtime_schema)
+
+	try:
+		from openai import OpenAI
+
+		model_name = os.getenv("POSTGRES_SCHEMA_ANALYSIS_MODEL", os.getenv("SQL_GENERATION_MODEL", "gpt-5.2"))
+		client = OpenAI(api_key=api_key)
+		response = client.chat.completions.create(
+			model=model_name,
+			temperature=0,
+			response_format={"type": "json_object"},
+			messages=[
+				{"role": "system", "content": POSTGRES_SCHEMA_ANALYZER_SYSTEM_PROMPT},
+				{"role": "user", "content": f"Here is the PostgreSQL schema report:\n\n{runtime_schema}"},
+			],
+		)
+		content = response.choices[0].message.content or "{}"
+		analysis = json.loads(content)
+		if not isinstance(analysis, dict):
+			raise ValueError("Schema analyzer returned non-object JSON.")
+		return analysis
+	except Exception as exc:
+		logger.warning("PostgreSQL AI metadata analysis failed; using deterministic fallback: %s", exc)
+		return _fallback_postgres_metadata(runtime_schema)
+
+
+async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
+	"""Return metadata_analysis.json-style schema blueprint plus auto hints."""
+	runtime_schema, auto_hints = await fetch_postgres_runtime_schema(connection_string)
+	metadata_analysis = _analyze_postgres_schema(runtime_schema)
+	blueprint = json.dumps(metadata_analysis, indent=2, ensure_ascii=False)
+	return blueprint, auto_hints
+
+
+async def fetch_tenant_postgres_runtime_schema(tenant_id: uuid.UUID | str) -> tuple[str, str]:
+	credential = await get_tenant_credentials(tenant_id)
+	if credential is None:
+		raise TenantDBConnectionError("Tenant database is not configured yet.")
+	if credential.db_type.lower() != "postgresql":
+		raise TenantDBConnectionError("Only PostgreSQL tenant databases are supported for PostgreSQL schema introspection.")
+
+	connection_url = _decrypt_credential_value(credential.connection_url)
+	return await fetch_postgres_runtime_schema(connection_url)
 
 
 async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:

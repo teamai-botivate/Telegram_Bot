@@ -22,6 +22,7 @@ from .database import (
     TenantDBConnectionError,
     execute_tenant_query,
     explain_validate_sql,
+    fetch_tenant_postgres_runtime_schema,
     get_tenant_by_chat_id,
     get_tenant_credentials,
     retrieve_similar_examples,
@@ -874,7 +875,25 @@ async def handle_message(msg: BotMessage) -> None:
             return
 
         if credentials.db_type.lower() == "postgresql":
-            blueprint = credentials.schema_blueprint or "No schema available."
+            metadata_blueprint = credentials.schema_blueprint or "No semantic metadata available."
+            try:
+                runtime_schema, runtime_hints = await fetch_tenant_postgres_runtime_schema(tenant.id)
+            except TenantDBConnectionError as schema_error:
+                logger.error("[SCHEMA_ERR] tenant=%s error='%s'", tenant.id, schema_error)
+                await send_reply(msg, DATABASE_CONNECTION_MESSAGE)
+                return
+
+            blueprint = (
+                "SEMANTIC METADATA (metadata_analysis.json):\n"
+                f"{metadata_blueprint}\n\n"
+                "TECHNICAL POSTGRESQL SCHEMA FOR SQL GENERATION:\n"
+                f"{runtime_schema}"
+            )
+            auto_schema_hints = "\n".join(
+                part
+                for part in (getattr(credentials, "auto_schema_hints", None), runtime_hints)
+                if part and str(part).strip()
+            )
             query_rows: list[dict[str, Any]] = []
             _generated_sql: str | None = None
 
@@ -910,7 +929,7 @@ async def handle_message(msg: BotMessage) -> None:
                         tenant.company_name,
                         blueprint,
                         msg.text,
-                        auto_schema_hints=getattr(credentials, "auto_schema_hints", None),
+                        auto_schema_hints=auto_schema_hints,
                         tenant_id=tenant.id,
                         product_connection_id=None,
                     )
