@@ -116,7 +116,7 @@ async def connect_tenant_db(
         if not payload.google_sheet_id or not payload.google_credentials_json:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="google_sheet_id and google_credentials_json are required.")
         try:
-            blueprint, _ = fetch_google_sheet_data(payload.google_sheet_id, payload.google_credentials_json)
+            blueprint, auto_schema_hints = fetch_google_sheet_data(payload.google_sheet_id, payload.google_credentials_json)
             schema_blueprint = blueprint
         except Exception as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Google Sheets connection failed: {e}")
@@ -164,7 +164,7 @@ async def create_full_tenant(
         if not payload.google_sheet_id or not payload.google_credentials_json:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="google_sheet_id and google_credentials_json are required.")
         try:
-            blueprint, _ = fetch_google_sheet_data(payload.google_sheet_id, payload.google_credentials_json)
+            blueprint, auto_schema_hints = fetch_google_sheet_data(payload.google_sheet_id, payload.google_credentials_json)
             schema_blueprint = blueprint
         except Exception as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Google Sheets connection failed: {e}")

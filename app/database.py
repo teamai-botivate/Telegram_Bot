@@ -916,11 +916,95 @@ async def deactivate_stale_examples(tenant_id: uuid.UUID | str, days: int = 90) 
     return 0
 
 
+def _infer_column_type(values: list[str]) -> str:
+	"""Infer column type from non-empty cell values."""
+	import re as _re
+	non_empty = [v for v in values if v not in (None, "")]
+	if not non_empty:
+		return "text"
+	bool_set = {"true", "false", "yes", "no", "1", "0"}
+	if all(str(v).strip().lower() in bool_set for v in non_empty):
+		return "boolean"
+	if all(_re.fullmatch(r"-?\d+", str(v).strip()) for v in non_empty):
+		return "integer"
+	if all(_re.fullmatch(r"-?\d+\.?\d*", str(v).strip()) for v in non_empty):
+		return "numeric"
+	date_pat = _re.compile(
+		r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}|^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}"
+	)
+	if all(date_pat.match(str(v).strip()) for v in non_empty):
+		return "date"
+	return "text"
+
+
+def _compact_sheet_value(value: Any, max_length: int = 160) -> str:
+	cleaned = str(value or "").replace("\n", " ").strip()
+	if len(cleaned) <= max_length:
+		return cleaned
+	return cleaned[: max_length - 1].rstrip() + "…"
+
+
+def _describe_sheet_from_headers(title: str, headers: list[str]) -> str:
+	lowered_title = title.lower()
+	lowered_headers = " ".join(headers).lower()
+	text = f"{lowered_title} {lowered_headers}"
+
+	if any(word in text for word in ("employee", "staff", "department", "designation", "manager", "salary")):
+		return "Employee/HR records, useful for employee lookup, departments, managers, leave, and performance questions."
+	if any(word in text for word in ("leave", "absence", "vacation")):
+		return "Leave tracking records, useful for leave balance, leaves taken, upcoming leave, and leave reasons."
+	if any(word in text for word in ("task", "pending", "deadline", "completion", "rating", "project")):
+		return "Task and performance records, useful for pending work, completed tasks, deadlines, and ratings."
+	if any(word in text for word in ("dashboard", "metric", "kpi", "summary")):
+		return "Dashboard or KPI summary sheet, useful for high-level business metrics."
+	return "General worksheet data. Use headers and row values to determine whether it answers the question."
+
+
+def _important_sheet_columns(headers: list[str], col_types: dict[str, str]) -> list[str]:
+	keywords = (
+		"id",
+		"name",
+		"email",
+		"phone",
+		"department",
+		"status",
+		"manager",
+		"date",
+		"leave",
+		"task",
+		"pending",
+		"deadline",
+		"rating",
+		"amount",
+		"salary",
+		"total",
+		"count",
+		"balance",
+	)
+	important = [
+		header
+		for header in headers
+		if col_types.get(header) in {"integer", "numeric", "date", "boolean"}
+		or any(keyword in header.lower() for keyword in keywords)
+	]
+	return important[:12]
+
+
 def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:
-	"""Connect to Google Sheets and return (blueprint, data_snapshot) strings."""
+	"""Connect to Google Sheets and return (rich_blueprint, hints) strings.
+
+	blueprint — structured schema with inferred types, sample values, and
+	            a bounded live data snapshot
+	hints     — auto-inferred rules for the LLM (IS NULL patterns, boolean flags,
+	            allowed values per column, and semantic sheet descriptions)
+	"""
 	import json
 	import gspread
 	from google.oauth2.service_account import Credentials
+
+	CATEGORICAL_THRESHOLD = 25
+	SAMPLE_ROWS = 3
+	FULL_DATA_ROW_LIMIT = int(os.getenv("GOOGLE_SHEETS_CONTEXT_ROW_LIMIT", "200"))
 
 	scopes = [
 		"https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -930,28 +1014,141 @@ def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, 
 	creds_dict = json.loads(credentials_json)
 	creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 	client = gspread.authorize(creds)
-
 	spreadsheet = client.open_by_key(sheet_id)
 
 	blueprint_lines: list[str] = []
-	snapshot_lines: list[str] = []
+	hint_lines: list[str] = []
+	sheet_summaries: list[str] = []
+
+	# Skip non-data utility tabs (case-insensitive)
+	SKIP_TABS = {"readme", "instructions", "config"}
 
 	for worksheet in spreadsheet.worksheets():
 		title = worksheet.title
-		all_values = worksheet.get_all_values()
+		if title.strip().lower() in SKIP_TABS:
+			continue
 
-		if not all_values:
+		all_values = worksheet.get_all_values()
+		if not all_values or len(all_values) < 1:
 			blueprint_lines.append(f"Sheet `{title}` | (empty)")
 			continue
 
-		headers = all_values[0]
-		blueprint_lines.append(f"Sheet `{title}` | Columns: {', '.join(headers)}")
+		headers = [h.strip() for h in all_values[0]]
+		data_rows = all_values[1:]
 
-		# Include first 50 rows as a snapshot to give the LLM real data context
-		for row in all_values[1:51]:
-			row_dict = dict(zip(headers, row))
-			snapshot_lines.append(f"{title}: {row_dict}")
+		# Drop blank headers
+		valid_indices = [i for i, h in enumerate(headers) if h]
+		valid_headers = [headers[i] for i in valid_indices]
 
-	blueprint = "Database Blueprint (Google Sheets):\n" + "\n".join(blueprint_lines)
-	snapshot = "\n".join(snapshot_lines)
-	return blueprint, snapshot
+		if not valid_headers:
+			continue
+
+		# Build column-wise value lists
+		col_values: dict[str, list[str]] = {}
+		for idx, h in zip(valid_indices, valid_headers):
+			col_values[h] = [
+				row[idx].strip() if idx < len(row) else ""
+				for row in data_rows
+			]
+
+		# ── Type inference ──
+		col_types: dict[str, str] = {h: _infer_column_type(col_values[h]) for h in valid_headers}
+
+		row_count = len(data_rows)
+		sheet_description = _describe_sheet_from_headers(title, valid_headers)
+		important_columns = _important_sheet_columns(valid_headers, col_types)
+		sheet_summaries.append(f"- `{title}`: {sheet_description}")
+		hint_lines.append(f"Sheet `{title}`: {sheet_description}")
+		if important_columns:
+			hint_lines.append(f"Important columns in `{title}`: {important_columns}")
+
+		blueprint_lines.append(f"Sheet `{title}` | Rows: ~{row_count}")
+		blueprint_lines.append(f"Description: {sheet_description}")
+
+		col_parts: list[str] = []
+		for h in valid_headers:
+			col_parts.append(f"{h} ({col_types[h]})")
+		blueprint_lines.append(f"Columns: {', '.join(col_parts)}")
+		blueprint_lines.append("Column details:")
+		for h in valid_headers:
+			nullable = any(v == "" for v in col_values[h]) if data_rows else True
+			blueprint_lines.append(f"- `{h}` | type={col_types[h]} | nullable={nullable}")
+
+		# ── Sample values for text columns ──
+		for h in valid_headers:
+			if col_types[h] != "text":
+				continue
+			non_empty = [v for v in col_values[h] if v][:5]
+			if non_empty:
+				blueprint_lines.append(f"Sample `{h}`: {non_empty}")
+
+		# ── Categorical allowed-values ──
+		for h in valid_headers:
+			if col_types[h] not in ("text", "boolean"):
+				continue
+			distinct = sorted({v for v in col_values[h] if v})
+			if 0 < len(distinct) <= CATEGORICAL_THRESHOLD:
+				blueprint_lines.append(f"Allowed values for `{h}`: {distinct}")
+				hint_lines.append(f"Allowed values for `{h}`: {distinct} — use exact match or case-insensitive contains")
+
+		# ── Date/nullable column hints (IS NULL = pending pattern) ──
+		status_keywords = {
+			"completed", "done", "approved", "closed", "finished",
+			"resolved", "verified", "paid", "delivered", "submission",
+		}
+		for h in valid_headers:
+			if col_types[h] != "date":
+				continue
+			has_empty = any(v == "" for v in col_values[h])
+			if has_empty and any(k in h.lower() for k in status_keywords):
+				hint_lines.append(
+					f"Status hint: Sheet `{title}` column `{h}` empty = pending/incomplete, "
+					f"IS NOT NULL = done/complete"
+				)
+
+		# ── Boolean hints ──
+		for h in valid_headers:
+			if col_types[h] == "boolean":
+				hint_lines.append(f"Boolean column: `{h}` — compare with TRUE/FALSE/Yes/No, never use ILIKE")
+
+		# ── Sample data rows (first N) ──
+		if data_rows:
+			blueprint_lines.append(f"Sample data ({min(SAMPLE_ROWS, row_count)} rows):")
+			for row in data_rows[:SAMPLE_ROWS]:
+				row_dict = {
+					h: _compact_sheet_value(row[i] if i < len(row) else "")
+					for i, h in zip(valid_indices, valid_headers)
+				}
+				blueprint_lines.append(f"  {row_dict}")
+
+			visible_rows = data_rows[:FULL_DATA_ROW_LIMIT]
+			blueprint_lines.append(
+				f"Full data snapshot ({len(visible_rows)} of {row_count} rows):"
+			)
+			for row_number, row in enumerate(visible_rows, start=2):
+				row_dict = {
+					h: _compact_sheet_value(row[i] if i < len(row) else "")
+					for i, h in zip(valid_indices, valid_headers)
+				}
+				blueprint_lines.append(f"  Row {row_number}: {row_dict}")
+			if row_count > len(visible_rows):
+				blueprint_lines.append(
+					f"  Snapshot truncated: {row_count - len(visible_rows)} additional rows are not included."
+				)
+
+		blueprint_lines.append("")
+
+	semantic_schema = (
+		"Semantic schema summary:\n"
+		+ ("\n".join(sheet_summaries) if sheet_summaries else "- No non-empty worksheets found.")
+	)
+	blueprint = "Database Blueprint (Google Sheets):\n" + semantic_schema + "\n\n" + "\n".join(blueprint_lines)
+
+	pending_rule = (
+		"PENDING RULE: When the user asks about pending, incomplete, or not done records — "
+		"check Status hints first. Use empty/blank check on the indicated column instead of "
+		"filtering by a text value. Only filter by text if the Allowed values list explicitly "
+		"contains the word 'pending'."
+	)
+	hints = pending_rule + "\n" + "\n".join(hint_lines)
+	return blueprint, hints

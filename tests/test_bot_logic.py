@@ -223,6 +223,23 @@ def test_does_not_expand_count_when_question_mentions_specific_table() -> None:
     assert expanded == sql
 
 
+def test_extract_sheet_value_filters_handles_headers_with_spaces() -> None:
+    hints = (
+        "Allowed values for `Employee Name`: ['Aarav Mehta', 'Nisha Rao'] — use exact match\n"
+        "Allowed values for `Department`: ['HR', 'Engineering'] — use exact match\n"
+    )
+
+    filters = bot_logic._extract_sheet_value_filters(
+        "What is Aarav Mehta's leave balance in HR?",
+        hints,
+    )
+
+    assert "Employee Name" in filters
+    assert "Aarav Mehta" in filters
+    assert "Department" in filters
+    assert "HR" in filters
+
+
 @pytest.mark.asyncio
 async def test_generate_sql_query_uses_sql_generation_model(monkeypatch) -> None:
     call_mock = AsyncMock(return_value="SELECT id FROM orders LIMIT 50")

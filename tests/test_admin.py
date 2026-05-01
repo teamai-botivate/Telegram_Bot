@@ -159,6 +159,7 @@ async def test_create_full_google_sheets_success(monkeypatch) -> None:
     assert call_kwargs["connection_url"] == "google_sheets://test_sheet_id"
     assert call_kwargs["google_credentials"] == '{"type": "service_account"}'
     assert call_kwargs["schema_blueprint"] == "Google Sheets Blueprint"
+    assert call_kwargs["auto_schema_hints"] == "Snapshot data"
 
 
 @pytest.mark.asyncio

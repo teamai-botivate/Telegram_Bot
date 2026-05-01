@@ -150,11 +150,14 @@ def _extract_name_filters(question: str, auto_schema_hints: str | None) -> str:
     if not auto_schema_hints:
         return ""
 
-    # Parse "Allowed values for <column>: ['val1', 'val2']" lines
+    # Parse "Allowed values for <column>: ['val1', 'val2']" lines.
+    # Google Sheets headers often contain spaces and are wrapped in backticks,
+    # while Postgres columns are usually simple identifiers.
     name_columns = {}  # {column_name: [values]}
     for line in auto_schema_hints.split("\n"):
         match = re.match(
-            r"Allowed values for (\w+):\s*\[(.+)\]", line.strip()
+            r"Allowed values for `?([^`:]+?)`?:\s*\[(.+?)\](?:\s|$)",
+            line.strip(),
         )
         if not match:
             continue
@@ -197,6 +200,65 @@ def _extract_name_filters(question: str, auto_schema_hints: str | None) -> str:
         f"\nPERSON FILTER (MANDATORY — the user mentioned specific people):\n"
         f"You MUST include this WHERE condition: {filter_text}\n"
         f"Do NOT omit this filter. The user is asking about specific people.\n"
+    )
+
+
+def _extract_sheet_value_filters(question: str, sheet_hints: str | None) -> str:
+    """Build natural-language filter instructions from allowed Sheet values.
+
+    The Google Sheets flow does not generate SQL, so the prompt needs plain
+    instructions rather than SQL WHERE fragments. This also supports headers
+    such as `Employee Name`, which cannot be parsed by the SQL-oriented helper.
+    """
+    if not sheet_hints:
+        return ""
+
+    question_lower = question.lower()
+    matched_filters: list[tuple[str, str]] = []
+
+    for line in sheet_hints.splitlines():
+        match = re.match(
+            r"Allowed values for `?([^`:]+?)`?:\s*\[(.+?)\](?:\s|$)",
+            line.strip(),
+        )
+        if not match:
+            continue
+
+        column_name = match.group(1).strip()
+        lowered_column = column_name.lower()
+        if not any(
+            keyword in lowered_column
+            for keyword in ("name", "employee", "manager", "assigned", "given", "department", "status")
+        ):
+            continue
+
+        raw_values = match.group(2)
+        values = [value.strip().strip("'\"") for value in raw_values.split(",")]
+        for value in sorted((v for v in values if len(v) > 1), key=len, reverse=True):
+            if value.lower() in question_lower:
+                matched_filters.append((column_name, value))
+                break
+
+    if not matched_filters:
+        return ""
+
+    deduped: list[tuple[str, str]] = []
+    seen = set()
+    for column_name, value in matched_filters:
+        key = (column_name.lower(), value.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((column_name, value))
+
+    lines = "\n".join(
+        f"- Match `{column_name}` to `{value}` case-insensitively."
+        for column_name, value in deduped
+    )
+    return (
+        "\nMATCHED FILTERS FROM USER QUESTION (mandatory):\n"
+        f"{lines}\n"
+        "Apply these filters before counting, listing, or summarizing rows.\n"
     )
 
 
@@ -911,35 +973,52 @@ async def handle_message(msg: BotMessage) -> None:
                 return
 
             try:
-                blueprint, data_snapshot = fetch_google_sheet_data(sheet_id, creds_json)
+                blueprint, gs_hints = fetch_google_sheet_data(sheet_id, creds_json)
             except Exception as e:
                 logger.error("Google Sheets fetch failed: %s", e)
                 await send_reply(msg, "I couldn't access your Google Sheet right now. Please try again.")
                 return
 
-            system_prompt = (
-                f"You are the customer assistant for {tenant.company_name}.\n"
-                f"Database Schema: {blueprint}\n\n"
-                f"Live Data (first 50 rows per sheet):\n{data_snapshot}\n\n"
-                "Instructions:\n"
-                "- Answer the user's question using ONLY the data above.\n"
-                "- Be concise and friendly.\n"
-                f"LANGUAGE RULE — CRITICAL:\n"
-                f'Look at this exact user question: \"{msg.text}\"\n'
-                "Identify what language THAT SPECIFIC SENTENCE is written in.\n"
-                "Ignore all other text including database data, column names, field values, and schema information.\n"
-                "Reply in the exact same language as that user question.\n"
-                "If the question is in English — reply in English.\n"
-                "If the question is in Hindi — reply in Hindi.\n"
-                "If the question is in any other language — reply in that language.\n"
-                "Database values in other languages must NOT influence your reply language."
-            )
+            sheet_filters = _extract_sheet_value_filters(msg.text, gs_hints)
+
+            system_prompt = f"""You are {tenant.company_name}'s Google Sheets data analyst.
+Answer using ONLY the GOOGLE SHEETS CONTEXT below.
+Plain text only. No markdown, no bold, no tables. Keep it short: 3-8 lines.
+
+GOOGLE SHEETS CONTEXT:
+{blueprint}
+
+RULES AND SEMANTIC HINTS:
+{gs_hints}
+{sheet_filters}
+ANSWERING RULES:
+- Treat each worksheet/tab as a table.
+- Use the FULL DATA SNAPSHOT rows as the source of truth for answers.
+- Sample rows are only examples of structure; do not answer from samples when full rows are available.
+- If the question names a sheet/tab, use that sheet first. Otherwise choose the sheet whose description and headers best match the question.
+- For person/employee questions, first filter rows by exact or case-insensitive name match in name-like columns.
+- For counts, sums, averages, maximums, and minimums, calculate from the matching rows. Do not estimate.
+- For lookup questions, return the exact value from the matching row and the most relevant fields around it.
+- For pending/incomplete/not done, apply the Status/Pending hints. Use blank completion/submission dates only when the hint says blank means pending.
+- If a sheet says its data snapshot is truncated and the question needs all rows, say the exact answer needs a full snapshot instead of inventing a number.
+- If the answer is not present in the context, say you could not find it in the sheet.
+
+AVOID:
+- Never say "Based on the data provided".
+- Never repeat every column name as a label on every row.
+- Never add filler like "Let me know if you need more!"
+
+LANGUAGE RULE:
+Look at this exact user question: "{msg.text}"
+Reply in the exact same language as that question. Database values in other languages must NOT influence your reply language.
+
+USER QUESTION: {msg.text}""".strip()
             reply = await _call_mistral(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": msg.text},
                 ],
-                max_tokens=500,
+                max_tokens=600,
                 model=RESPONSE_FORMAT_MODEL,
             )
             await send_reply(msg, reply or "I couldn't generate a response.")
