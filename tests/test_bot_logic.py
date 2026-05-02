@@ -215,6 +215,43 @@ def test_validate_generated_sql_blocks_non_read_only(sql: str) -> None:
         bot_logic._validate_generated_sql(sql)
 
 
+def test_detects_unsupported_distinct_window_count() -> None:
+    sql = (
+        "SELECT u.user_name, "
+        "COUNT(DISTINCT u.user_name) OVER () AS matching_user_count "
+        "FROM users AS u"
+    )
+
+    assert bot_logic._has_unsupported_distinct_window(sql)
+    assert not bot_logic._has_unsupported_distinct_window(
+        "SELECT user_name, COUNT(*) OVER () AS matching_user_count FROM users"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fixes_unsupported_distinct_window_count(monkeypatch) -> None:
+    fix_mock = AsyncMock(
+        return_value=(
+            "SELECT distinct_users.user_name, "
+            "COUNT(*) OVER () AS matching_user_count "
+            "FROM (SELECT DISTINCT u.user_name FROM users AS u) AS distinct_users "
+            "LIMIT 50"
+        )
+    )
+    monkeypatch.setattr(bot_logic, "fix_sql", fix_mock)
+
+    fixed_sql = await bot_logic._fix_unsupported_postgres_constructs(
+        "SELECT u.user_name, "
+        "COUNT(DISTINCT u.user_name) OVER () AS matching_user_count "
+        "FROM users AS u LIMIT 50",
+        "Table `users`\nColumns: user_name (text)",
+    )
+
+    assert "COUNT(*) OVER ()" in fixed_sql
+    assert "SELECT DISTINCT u.user_name" in fixed_sql
+    assert "DISTINCT inside window functions" in fix_mock.await_args.args[1]
+
+
 def test_expand_generic_count_query_across_matching_tables() -> None:
     schema_blueprint = (
         "Table `checklist`\n"
@@ -359,6 +396,55 @@ async def test_handle_message_expands_generic_count_query_across_tables(monkeypa
     assert "FROM checklist AS t1" in executed_sql
     assert "FROM delegation AS t2" in executed_sql
     send_reply_mock.assert_awaited_once_with(message, "There is 1 task assigned by Admin.")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_repairs_distinct_window_before_explain(monkeypatch) -> None:
+    tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
+    credentials = SimpleNamespace(
+        db_type="postgresql",
+        connection_url="encrypted_url",
+        schema_blueprint="Table `users`\nColumns: user_name (text)",
+    )
+    send_reply_mock = AsyncMock()
+    execute_mock = AsyncMock(return_value=[{"user_name": "user", "matching_user_count": 1}])
+    explain_mock = AsyncMock(return_value=(True, ""))
+    fixed_sql = (
+        "SELECT distinct_users.user_name, COUNT(*) OVER () AS matching_user_count "
+        "FROM (SELECT DISTINCT u.user_name FROM users AS u "
+        "WHERE u.user_name ILIKE '%user%') AS distinct_users "
+        "ORDER BY distinct_users.user_name ASC LIMIT 50"
+    )
+
+    monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
+    monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(
+        bot_logic,
+        "generate_sql_query",
+        AsyncMock(
+            return_value=(
+                "SELECT u.user_name, COUNT(DISTINCT u.user_name) OVER () AS matching_user_count "
+                "FROM users AS u WHERE u.user_name ILIKE '%user%' "
+                "ORDER BY u.user_name ASC LIMIT 50"
+            )
+        ),
+    )
+    monkeypatch.setattr(bot_logic, "fix_sql", AsyncMock(return_value=fixed_sql))
+    monkeypatch.setattr(bot_logic, "explain_validate_sql", explain_mock)
+    monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
+    monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="user: 1"))
+
+    message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Show user count")
+    await bot_logic.handle_message(message)
+
+    explained_sql = explain_mock.await_args.args[1]
+    executed_sql = execute_mock.await_args.args[1]
+    assert "COUNT(DISTINCT" not in explained_sql
+    assert explained_sql == fixed_sql
+    assert executed_sql == fixed_sql
+    send_reply_mock.assert_awaited_once_with(message, "user: 1")
 
 
 @pytest.mark.asyncio

@@ -720,6 +720,9 @@ SQL REQUIREMENTS:
 - Only use columns that exist in the schema
 - LIMIT must be included
 - For UNION ALL, cast columns to ::text
+- PostgreSQL does not support COUNT(DISTINCT ...) OVER (). If you need
+  distinct rows plus a total count, use SELECT DISTINCT in a subquery and
+  COUNT(*) OVER () in the outer query.
 - If the question asks for separate counts per table/category/person, return
   those as separate named columns or rows with clear labels.
 - If the question asks "who gave/assigned/owns" along with a count, GROUP BY
@@ -756,6 +759,8 @@ COMMON FIXES:
 - Column not found: check exact column name in schema above
 - Boolean column: use = TRUE or = FALSE, never ILIKE
 - Nullable column: use IS NULL or IS NOT NULL
+- DISTINCT window count: PostgreSQL does not support COUNT(DISTINCT ...) OVER ().
+  Put SELECT DISTINCT in a subquery, then use COUNT(*) OVER () in the outer query.
 
 Corrected SQL:
 """.strip()
@@ -820,6 +825,29 @@ def _validate_generated_sql(sql: str) -> str:
         raise ValueError("Generated SQL uses SELECT * which is not allowed.")
 
     return cleaned
+
+
+def _has_unsupported_distinct_window(sql: str) -> bool:
+    return bool(
+        re.search(
+            r"\bcount\s*\(\s*distinct\b.*?\)\s*over\s*\(",
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+async def _fix_unsupported_postgres_constructs(sql: str, schema_blueprint: str) -> str:
+    if not _has_unsupported_distinct_window(sql):
+        return sql
+
+    fixed_sql = await fix_sql(
+        sql,
+        "PostgreSQL does not support DISTINCT inside window functions. "
+        "Rewrite using a SELECT DISTINCT subquery, then use COUNT(*) OVER () in the outer query.",
+        schema_blueprint,
+    )
+    return _validate_generated_sql(fixed_sql)
 
 
 async def _build_welcome_message(chat_id: str) -> str:
@@ -1000,6 +1028,7 @@ async def handle_message(msg: BotMessage) -> None:
                     )
                     sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                     sql_query = _validate_generated_sql(sql_query)
+                    sql_query = await _fix_unsupported_postgres_constructs(sql_query, blueprint)
                     logger.info(f"[SQL_GEN] tenant={tenant.id} query='{msg.text}'")
                     logger.info(f"[SQL_OUT] {sql_query}")
 
@@ -1010,6 +1039,7 @@ async def handle_message(msg: BotMessage) -> None:
                         sql_query = await fix_sql(sql_query, explain_err, blueprint)
                         sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                         sql_query = _validate_generated_sql(sql_query)
+                        sql_query = await _fix_unsupported_postgres_constructs(sql_query, blueprint)
                         logger.info(f"[SQL_FIXED_BY_EXPLAIN] {sql_query}")
 
                     max_retries = 2
@@ -1039,6 +1069,7 @@ async def handle_message(msg: BotMessage) -> None:
                             sql_query = await fix_sql(sql_query, final_error, blueprint)
                             sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
                             sql_query = _validate_generated_sql(sql_query)
+                            sql_query = await _fix_unsupported_postgres_constructs(sql_query, blueprint)
                             logger.info(f"[SQL_OUT] {sql_query}")
 
                     # top_similarity value is in the preceding [FEW_SHOT] log line.
