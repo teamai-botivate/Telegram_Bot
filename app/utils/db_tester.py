@@ -105,7 +105,9 @@ async def test_postgres_connection(
 
     conn: asyncpg.Connection | None = None
     try:
-        conn = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=timeout)
+        conn = await asyncpg.connect(
+            clean_url, ssl=ssl_arg, timeout=timeout, statement_cache_size=0
+        )
         await conn.fetchval("SELECT 1")
         return True, ""
     except Exception as exc:
@@ -124,6 +126,12 @@ async def open_postgres_connection(
     timeout: float = 15.0,
 ) -> asyncpg.Connection:
     """Open and return an asyncpg connection ready for queries. Raises ValueError on
-    URL problems; raises the original asyncpg/network exception on connect failure."""
+    URL problems; raises the original asyncpg/network exception on connect failure.
+
+    statement_cache_size=0 is required for compatibility with Supabase / PgBouncer
+    transaction-pooler URLs. Has negligible perf cost for direct Postgres URLs.
+    """
     clean_url, ssl_arg = _normalize_postgres_url(connection_url, ssl_required=ssl_required)
-    return await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=timeout)
+    return await asyncpg.connect(
+        clean_url, ssl=ssl_arg, timeout=timeout, statement_cache_size=0
+    )

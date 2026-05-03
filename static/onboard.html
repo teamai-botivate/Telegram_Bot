@@ -530,7 +530,12 @@
           const contactName = _contextData ? _contextData.contact_name : 'there';
           showSuccess(contactName);
         } else {
-          showSubmitError();
+          let serverMsg = '';
+          try {
+            const data = await res.json();
+            serverMsg = data.message || data.detail || data.error || '';
+          } catch (_) {}
+          showSubmitError(serverMsg);
         }
       } catch (_) {
         showSubmitError();
@@ -557,8 +562,14 @@
       document.getElementById('success-state').style.display = 'block';
     }
 
-    function showSubmitError() {
-      document.getElementById('submit-error').classList.add('visible');
+    function showSubmitError(serverMsg) {
+      const el = document.getElementById('submit-error');
+      if (serverMsg) {
+        el.textContent = serverMsg;
+      } else {
+        el.innerHTML = 'Submission failed. Please check your details and try again, or contact <a href="mailto:support@botivate.in">support@botivate.in</a>.';
+      }
+      el.classList.add('visible');
     }
     function hideSubmitError() {
       document.getElementById('submit-error').classList.remove('visible');

@@ -368,6 +368,7 @@ async def _open_fresh_connection(tenant_id: uuid.UUID | str) -> asyncpg.Connecti
 					clean_url,
 					ssl=ssl_arg,
 					timeout=TENANT_DB_CONNECT_TIMEOUT_SECONDS,
+					statement_cache_size=0,
 				)
 				await _touch_last_connected(credential.id)
 				return connection
@@ -396,6 +397,7 @@ async def get_tenant_pool(tenant_id: str, connection_string: str, ssl_arg: str) 
 				timeout=TENANT_DB_CONNECT_TIMEOUT_SECONDS,
 				command_timeout=30,
 				max_inactive_connection_lifetime=60,
+				statement_cache_size=0,
 			)
 		return _tenant_pools[tenant_id]
 
@@ -635,7 +637,7 @@ async def fetch_postgres_runtime_schema(connection_string: str) -> tuple[str, st
 		allowed_ssl_modes = {"require", "prefer", "disable", "verify-ca", "verify-full"}
 		ssl_arg = ssl_mode if ssl_mode in allowed_ssl_modes else "require"
 
-		connection = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=15)
+		connection = await asyncpg.connect(clean_url, ssl=ssl_arg, timeout=15, statement_cache_size=0)
 
 		enum_sql = """
 		SELECT t.typname AS enum_name, array_agg(e.enumlabel::text) AS enum_values
