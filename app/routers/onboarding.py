@@ -349,12 +349,13 @@ async def submit(payload: OnboardSubmitRequest) -> JSONResponse:
             await session.execute(
                 text(
                     "INSERT INTO tenant_db_credentials "
-                    "(tenant_id, db_type, product_slug, display_name, connection_url, "
+                    "(id, tenant_id, db_type, product_slug, display_name, connection_url, "
                     " google_credentials, schema_blueprint, auto_schema_hints, ssl_required) "
-                    "VALUES (:tenant_id, :db_type, :product_slug, :display_name, :connection_url, "
+                    "VALUES (:id, :tenant_id, :db_type, :product_slug, :display_name, :connection_url, "
                     "        :google_credentials, :schema_blueprint, :auto_schema_hints, :ssl_required)"
                 ),
                 {
+                    "id": uuid.uuid4(),
                     "tenant_id": tenant_id,
                     "db_type": db_type,
                     "product_slug": payload.product_slug,
