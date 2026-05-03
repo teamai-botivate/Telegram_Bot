@@ -1364,22 +1364,18 @@ async def _handle_unboarded_client(msg: BotMessage, registered_client: Any) -> N
 
 
 async def _handle_adddb_command(msg: BotMessage) -> None:
-    """Handle the /adddb command — let an existing tenant connect an additional database."""
+    """Handle the /adddb command — let an existing or not-yet-onboarded client connect a database."""
     from .auth.onboarding_jwt import build_form_url, issue_token
 
-    tenant = await get_tenant_by_chat_id(msg.chat_id)
-    if tenant is None:
-        await send_reply(msg, "Please complete initial setup first.")
-        return
-
-    # Look up the registered_client to get purchased_products
+    # registered_client is the source of truth for purchased_products.
+    # A tenant row is NOT required — unboarded clients (tenant_id=None) can also use /adddb.
     registered_client = await find_registered_client_by_chat(
         msg.platform.value, msg.chat_id
     )
     if registered_client is None:
         await send_reply(
             msg,
-            "I couldn't find your product list. Please contact the Botivate team.",
+            "I couldn't find your account. Please contact the Botivate team to get registered.",
         )
         return
 
@@ -1392,13 +1388,16 @@ async def _handle_adddb_command(msg: BotMessage) -> None:
         )
         return
 
-    # Determine which slugs already have a credential row
-    all_creds = await get_tenant_credentials_all(tenant.id)
-    connected_slugs: set[str] = {
-        getattr(c, "product_slug", None)
-        for c in all_creds
-        if getattr(c, "product_slug", None)
-    }
+    # Determine which slugs already have a credential row (only possible if tenant exists)
+    connected_slugs: set[str] = set()
+    tenant = await get_tenant_by_chat_id(msg.chat_id)
+    if tenant is not None:
+        all_creds = await get_tenant_credentials_all(tenant.id)
+        connected_slugs = {
+            getattr(c, "product_slug", None)
+            for c in all_creds
+            if getattr(c, "product_slug", None)
+        }
 
     unconnected = [p for p in purchased if p.get("slug") not in connected_slugs]
 
@@ -1413,10 +1412,11 @@ async def _handle_adddb_command(msg: BotMessage) -> None:
     if len(unconnected) == 1:
         slug = unconnected[0].get("slug")
         display = unconnected[0].get("display_name") or slug or "database"
+        purpose = "initial_setup" if tenant is None else "add_database"
         try:
             token, _ = await issue_token(
                 registered_client_id=registered_client.id,
-                purpose="add_database",
+                purpose=purpose,
                 product_slug=slug,
             )
             form_url = build_form_url(token)
@@ -1466,10 +1466,6 @@ async def handle_adddb_callback(
 
     slug = callback_data.removeprefix("adddb_product:").strip()
     if not slug:
-        return
-
-    tenant = await get_tenant_by_chat_id(chat_id)
-    if tenant is None:
         return
 
     registered_client = await find_registered_client_by_chat(Platform.TELEGRAM.value, chat_id)
