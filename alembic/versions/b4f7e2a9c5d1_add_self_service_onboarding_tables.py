@@ -19,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.execute(
         """
-        CREATE TABLE registered_clients (
+        CREATE TABLE IF NOT EXISTS registered_clients (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             external_id TEXT NULL,
             company_name TEXT NOT NULL,
@@ -37,24 +37,24 @@ def upgrade() -> None:
     )
 
     op.execute(
-        "CREATE INDEX ix_registered_clients_whatsapp_number "
+        "CREATE INDEX IF NOT EXISTS ix_registered_clients_whatsapp_number "
         "ON registered_clients (whatsapp_number) "
         "WHERE whatsapp_number IS NOT NULL"
     )
     op.execute(
-        "CREATE INDEX ix_registered_clients_telegram_chat_id "
+        "CREATE INDEX IF NOT EXISTS ix_registered_clients_telegram_chat_id "
         "ON registered_clients (telegram_chat_id) "
         "WHERE telegram_chat_id IS NOT NULL"
     )
     op.execute(
-        "CREATE INDEX ix_registered_clients_phone_number "
+        "CREATE INDEX IF NOT EXISTS ix_registered_clients_phone_number "
         "ON registered_clients (phone_number) "
         "WHERE phone_number IS NOT NULL"
     )
 
     op.execute(
         """
-        CREATE TABLE onboarding_tokens (
+        CREATE TABLE IF NOT EXISTS onboarding_tokens (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             registered_client_id UUID NOT NULL REFERENCES registered_clients(id) ON DELETE CASCADE,
             purpose TEXT NOT NULL CHECK (purpose IN ('initial_setup', 'add_database')),
@@ -68,11 +68,11 @@ def upgrade() -> None:
     )
 
     op.execute(
-        "CREATE INDEX ix_onboarding_tokens_jwt_jti "
+        "CREATE INDEX IF NOT EXISTS ix_onboarding_tokens_jwt_jti "
         "ON onboarding_tokens (jwt_jti)"
     )
     op.execute(
-        "CREATE INDEX ix_onboarding_tokens_registered_client_id "
+        "CREATE INDEX IF NOT EXISTS ix_onboarding_tokens_registered_client_id "
         "ON onboarding_tokens (registered_client_id)"
     )
 
