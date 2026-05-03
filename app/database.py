@@ -17,7 +17,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from .models import Base, Tenant, TenantDBCredential
+from .models import Base, RegisteredClient, Tenant, TenantDBCredential
 
 load_dotenv()
 
@@ -144,6 +144,42 @@ async def create_tables() -> None:
 		await connection.run_sync(Base.metadata.create_all)
 
 
+async def find_registered_client_by_chat(
+    platform: str,
+    chat_id: str,
+    phone: str | None = None,
+) -> RegisteredClient | None:
+    """Look up a pre-registered (not yet onboarded) client by their platform handle.
+
+    Telegram: match on telegram_chat_id.
+    WhatsApp: match on whatsapp_number OR phone_number (both stored in E.164 format).
+    Returns None if not found or the session factory is unconfigured.
+    """
+    if session_factory is None:
+        return None
+
+    platform_lower = platform.lower()
+
+    async with session_factory() as session:
+        if platform_lower == "telegram":
+            stmt = select(RegisteredClient).where(
+                RegisteredClient.telegram_chat_id == chat_id,
+                RegisteredClient.is_active.is_(True),
+            )
+        else:
+            # WhatsApp: chat_id is the sender's phone number; also check phone_number column.
+            conditions = [RegisteredClient.whatsapp_number == chat_id]
+            if phone:
+                conditions.append(RegisteredClient.phone_number == phone)
+            stmt = select(RegisteredClient).where(
+                or_(*conditions),
+                RegisteredClient.is_active.is_(True),
+            )
+
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
 async def get_tenant_by_chat_id(chat_id: str) -> Tenant | None:
 	if session_factory is None:
 		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
@@ -156,15 +192,42 @@ async def get_tenant_by_chat_id(chat_id: str) -> Tenant | None:
 
 
 async def get_tenant_credentials(tenant_id: uuid.UUID | str) -> TenantDBCredential | None:
+	"""Return a single credential row for a tenant.
+
+	Multi-DB tenants have more than one row; this legacy helper returns the most
+	recent one. Callers that need the full set should use `get_tenant_credentials_all`.
+	"""
 	if session_factory is None:
 		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
 
 	tenant_uuid = uuid.UUID(str(tenant_id))
-	statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
+	statement = (
+		select(TenantDBCredential)
+		.where(TenantDBCredential.tenant_id == tenant_uuid)
+		.order_by(TenantDBCredential.last_connected_at.desc().nullslast())
+		.limit(1)
+	)
 
 	async with session_factory() as session:
 		result = await session.execute(statement)
-		return result.scalar_one_or_none()
+		return result.scalars().first()
+
+
+async def get_tenant_credentials_all(tenant_id: uuid.UUID | str) -> list[TenantDBCredential]:
+	"""Return every credential row attached to a tenant. Empty list if none."""
+	if session_factory is None:
+		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
+
+	tenant_uuid = uuid.UUID(str(tenant_id))
+	statement = (
+		select(TenantDBCredential)
+		.where(TenantDBCredential.tenant_id == tenant_uuid)
+		.order_by(TenantDBCredential.last_connected_at.desc().nullslast())
+	)
+
+	async with session_factory() as session:
+		result = await session.execute(statement)
+		return list(result.scalars().all())
 
 
 
@@ -354,15 +417,20 @@ async def _get_pool_for_tenant(tenant_id: uuid.UUID | str) -> asyncpg.Pool:
 	credential = await get_tenant_credentials(tenant_id)
 	if credential is None:
 		raise TenantDBConnectionError("Tenant database is not configured yet.")
+	return await _get_pool_for_credential(credential)
 
+
+async def _get_pool_for_credential(credential: TenantDBCredential) -> asyncpg.Pool:
+	"""Pool a connection keyed by the credential row id (so a tenant with multiple DBs
+	gets one pool per DB)."""
 	if credential.db_type.lower() != "postgresql":
 		raise TenantDBConnectionError("Only PostgreSQL tenant databases are currently supported.")
 
 	clean_url, ssl_arg = _resolve_tenant_dsn(credential)
-	tid = str(tenant_id)
+	cache_key = str(credential.id)
 
 	try:
-		pool = await get_tenant_pool(tid, clean_url, ssl_arg)
+		pool = await get_tenant_pool(cache_key, clean_url, ssl_arg)
 		await _touch_last_connected(credential.id)
 		return pool
 	except TenantDBConnectionError:
@@ -438,6 +506,82 @@ async def explain_validate_sql(tenant_id: uuid.UUID | str, sql: str) -> tuple[bo
 		logger.warning("EXPLAIN unexpected error for tenant %s: %s", tid, e)
 		# Don't block on unexpected errors — let execution try
 		return True, ""
+
+
+async def execute_credential_query(
+	credential: TenantDBCredential,
+	sql: str,
+	*params: Any,
+	allow_select_star: bool = False,
+) -> list[dict[str, Any]]:
+	"""Run a SELECT against a specific credential's database.
+
+	Mirrors execute_tenant_query() but targets one specific credential row, so it
+	works for tenants with multiple DBs.
+	"""
+	cache_key = str(credential.id)
+
+	for attempt in range(2):
+		pool = await _get_pool_for_credential(credential)
+		try:
+			async with pool.acquire() as connection:
+				safe_sql = _sanitize_select_sql(sql, allow_select_star=allow_select_star)
+				logger.info(
+					"Tenant query attempt credential_id=%s timestamp=%s sql=%s",
+					credential.id,
+					datetime.now(timezone.utc).isoformat(),
+					safe_sql,
+				)
+				rows = await connection.fetch(safe_sql, *params)
+				return [dict(row) for row in rows]
+		except (TimeoutError, OSError, ConnectionResetError) as e:
+			logger.warning("Pool connection failed for credential %s (attempt %d): %s", cache_key, attempt + 1, e)
+			await _evict_tenant_pool(cache_key)
+			if attempt == 1:
+				raise TenantDBConnectionError(f"Could not connect to tenant database after retry: {e}")
+		except QueryExecutionError:
+			raise
+		except SecurityError:
+			raise
+		except asyncpg.PostgresError as e:
+			logger.error(f"PostgresError executing credential query. SQL: {sql} | Error: {e}")
+			raise QueryExecutionError(f"Failed to execute query: {e}")
+		except Exception as e:
+			logger.error(f"Unexpected error executing credential query: {e}")
+			raise QueryExecutionError("An unexpected error occurred while running tenant query.")
+
+
+async def explain_validate_sql_for_credential(
+	credential: TenantDBCredential, sql: str
+) -> tuple[bool, str]:
+	"""EXPLAIN-validate a SQL statement against a specific credential's DB."""
+	cache_key = str(credential.id)
+	try:
+		pool = await _get_pool_for_credential(credential)
+		async with pool.acquire() as connection:
+			await connection.fetch(f"EXPLAIN {sql}")
+		return True, ""
+	except (TimeoutError, OSError, ConnectionResetError) as e:
+		logger.warning("EXPLAIN connection failed for credential %s: %s", cache_key, e)
+		await _evict_tenant_pool(cache_key)
+		return True, ""
+	except asyncpg.PostgresError as e:
+		error_msg = str(e)
+		logger.info("[EXPLAIN_FAIL] credential=%s sql=%s error=%s", cache_key, sql, error_msg)
+		return False, error_msg
+	except Exception as e:
+		logger.warning("EXPLAIN unexpected error for credential %s: %s", cache_key, e)
+		return True, ""
+
+
+async def fetch_credential_postgres_runtime_schema(
+	credential: TenantDBCredential,
+) -> tuple[str, str]:
+	"""Runtime schema introspection for a specific credential's DB."""
+	if credential.db_type.lower() != "postgresql":
+		raise TenantDBConnectionError("Only PostgreSQL tenant databases are supported for PostgreSQL schema introspection.")
+	connection_url = _decrypt_credential_value(credential.connection_url)
+	return await fetch_postgres_runtime_schema(connection_url)
 
 
 async def create_tenant_record(company_name: str, active_modules: list[str]) -> uuid.UUID:
@@ -891,11 +1035,17 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 
 	tenant_uuid = uuid.UUID(str(tenant_id))
 	async with session_factory() as session:
-		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
+		statement = (
+			select(TenantDBCredential)
+			.where(TenantDBCredential.tenant_id == tenant_uuid)
+			.order_by(TenantDBCredential.last_connected_at.desc().nullslast())
+			.limit(1)
+		)
 		result = await session.execute(statement)
-		credential = result.scalar_one_or_none()
+		credential = result.scalars().first()
 		if credential is None:
 			raise ValueError("Tenant credentials not found.")
+		credential_id = credential.id
 		db_type = credential.db_type.lower()
 		connection_url = _decrypt_credential_value(credential.connection_url)
 		google_credentials = (
@@ -915,9 +1065,7 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		raise ValueError("Schema refresh is supported only for PostgreSQL and Google Sheets tenants.")
 
 	async with session_factory() as session:
-		statement = select(TenantDBCredential).where(TenantDBCredential.tenant_id == tenant_uuid)
-		result = await session.execute(statement)
-		credential = result.scalar_one_or_none()
+		credential = await session.get(TenantDBCredential, credential_id)
 		if credential is None:
 			raise ValueError("Tenant credentials not found.")
 		credential.schema_blueprint = blueprint

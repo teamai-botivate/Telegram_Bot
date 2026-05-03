@@ -6,7 +6,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import APIRouter, Query, Request, Response
 
-from .bot_logic import handle_message
+from .bot_logic import handle_adddb_callback, handle_message
 from .platforms.base import BotMessage, Platform
 
 load_dotenv()
@@ -21,6 +21,25 @@ router = APIRouter(tags=["webhook"])
 async def telegram_webhook(request: Request) -> dict[str, bool]:
 	try:
 		data: dict[str, Any] = await request.json()
+
+		# Handle inline keyboard button presses
+		callback_query = data.get("callback_query")
+		if isinstance(callback_query, dict):
+			cq_id = str(callback_query.get("id", ""))
+			cq_data = callback_query.get("data", "")
+			cq_from = callback_query.get("from") or {}
+			cq_message = callback_query.get("message") or {}
+			cq_chat = cq_message.get("chat") or {}
+			cq_chat_id = cq_chat.get("id") or cq_from.get("id")
+			if cq_chat_id and isinstance(cq_data, str) and cq_data.startswith("adddb_product:"):
+				asyncio.create_task(
+					handle_adddb_callback(
+						chat_id=str(cq_chat_id),
+						callback_query_id=cq_id,
+						callback_data=cq_data,
+					)
+				)
+			return {"ok": True}
 
 		message = data.get("message")
 		if not isinstance(message, dict):

@@ -1,0 +1,582 @@
+<!-- Deployed on Render. Served via FastAPI StaticFiles at /static/onboard.html.
+     POST target and context endpoint are on the same Render service. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connect Your Database | Botivate</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
+        crossorigin="anonymous" referrerpolicy="no-referrer">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    /* ── Card ─────────────────────────────────────────────────────────── */
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 40px;
+      width: 100%;
+      max-width: 580px;
+      box-shadow: 0 25px 50px rgba(0,0,0,0.4);
+    }
+
+    h1 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 6px;
+      line-height: 1.3;
+    }
+
+    p.subtitle {
+      color: #94a3b8;
+      font-size: 0.875rem;
+      margin-bottom: 32px;
+    }
+
+    hr.divider {
+      border: 0;
+      border-top: 1px solid #334155;
+      margin: 24px 0;
+    }
+
+    /* ── Labels / Inputs ──────────────────────────────────────────────── */
+    label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #94a3b8;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      transition: border-color 0.2s;
+      outline: none;
+      resize: vertical;
+    }
+    input:focus, select:focus, textarea:focus { border-color: #6366f1; }
+    input::placeholder, textarea::placeholder { color: #475569; font-size: 0.82rem; }
+
+    .field { margin-bottom: 20px; }
+
+    .hint {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-top: 5px;
+      line-height: 1.5;
+    }
+    .hint code {
+      background: #0f172a;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #a5b4fc;
+    }
+
+    /* ── Password input with eye toggle ──────────────────────────────── */
+    .input-wrap {
+      position: relative;
+    }
+    .input-wrap input {
+      padding-right: 40px;
+    }
+    .toggle-eye {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 0.9rem;
+      padding: 0;
+      line-height: 1;
+    }
+    .toggle-eye:hover { color: #94a3b8; }
+
+    /* ── DB-type badge ────────────────────────────────────────────────── */
+    .db-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #1e1b4b;
+      border: 1px solid #6366f1;
+      color: #a5b4fc;
+      border-radius: 999px;
+      padding: 6px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+    .db-badge .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #6366f1;
+      flex-shrink: 0;
+    }
+
+    /* ── Select ───────────────────────────────────────────────────────── */
+    select {
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      padding-right: 36px;
+    }
+
+    /* ── Read-only product label ──────────────────────────────────────── */
+    .readonly-value {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+    }
+
+    /* ── Inline field error ───────────────────────────────────────────── */
+    .field-error {
+      font-size: 0.75rem;
+      color: #f87171;
+      margin-top: 4px;
+      display: none;
+    }
+    .field-error.visible { display: block; }
+
+    /* ── Submit button ────────────────────────────────────────────────── */
+    .btn-primary {
+      width: 100%;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: white;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      padding: 13px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      font-family: inherit;
+      margin-top: 4px;
+    }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Error banner above submit ────────────────────────────────────── */
+    .submit-error {
+      background: #2a0f0f;
+      border: 1px solid #dc2626;
+      border-radius: 10px;
+      padding: 14px 16px;
+      color: #f87171;
+      font-size: 0.875rem;
+      margin-bottom: 14px;
+      display: none;
+      line-height: 1.5;
+    }
+    .submit-error.visible { display: block; }
+
+    /* ── Loading state ────────────────────────────────────────────────── */
+    #loading-state {
+      text-align: center;
+      padding: 20px 0 4px;
+    }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid #334155;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-state p { color: #94a3b8; font-size: 0.9rem; }
+
+    /* ── Error state ──────────────────────────────────────────────────── */
+    #error-state {
+      text-align: center;
+      padding: 20px 0 4px;
+    }
+    .error-icon { font-size: 2.5rem; margin-bottom: 16px; }
+    #error-state p {
+      color: #f87171;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    /* ── Success state ────────────────────────────────────────────────── */
+    #success-state {
+      text-align: center;
+      padding: 16px 0 4px;
+    }
+    .success-icon {
+      width: 72px; height: 72px;
+      background: linear-gradient(135deg, #16a34a, #15803d);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 24px;
+      font-size: 2rem;
+      color: white;
+      box-shadow: 0 8px 24px rgba(22,163,74,0.35);
+    }
+    #success-state h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 14px;
+    }
+    #success-state p {
+      color: #94a3b8;
+      font-size: 0.9rem;
+      line-height: 1.7;
+    }
+
+    /* ── Footer ───────────────────────────────────────────────────────── */
+    footer {
+      margin-top: 24px;
+      color: #475569;
+      font-size: 0.75rem;
+      text-align: center;
+    }
+    footer a { color: #64748b; text-decoration: none; }
+    footer a:hover { color: #94a3b8; }
+
+    /* ── Responsive ───────────────────────────────────────────────────── */
+    @media (max-width: 480px) {
+      .card { padding: 28px 20px; }
+      h1 { font-size: 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="card" id="main-card">
+
+    <!-- Loading state (default) -->
+    <div id="loading-state">
+      <div class="spinner"></div>
+      <p>Loading your account details…</p>
+    </div>
+
+    <!-- Error state -->
+    <div id="error-state" style="display:none">
+      <div class="error-icon">⚠️</div>
+      <p id="error-message">This link has expired or is invalid. Please contact Botivate support.</p>
+    </div>
+
+    <!-- Form (hidden until context loads) -->
+    <div id="form-state" style="display:none">
+      <h1 id="form-heading">Welcome!</h1>
+      <p class="subtitle">Connect your database to get started with Botivate.</p>
+
+      <hr class="divider">
+
+      <form id="onboard-form" novalidate>
+
+        <!-- Product field (single = read-only label; multi = select) -->
+        <div class="field" id="product-field">
+          <label>Product</label>
+          <!-- Populated by JS -->
+        </div>
+
+        <!-- DB Type badge (always read-only) -->
+        <div class="field">
+          <label>Database Type</label>
+          <div>
+            <span class="db-badge" id="db-type-badge">
+              <span class="dot"></span>
+              <span id="db-type-label">PostgreSQL</span>
+            </span>
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <!-- PostgreSQL credentials -->
+        <div id="pg-section">
+          <div class="field">
+            <label for="pg-url">PostgreSQL Connection URL</label>
+            <div class="input-wrap">
+              <input type="password" id="pg-url" name="pg-url" autocomplete="off"
+                     placeholder="postgresql://user:password@host:5432/dbname">
+              <button type="button" class="toggle-eye" onclick="toggleEye('pg-url', this)"
+                      aria-label="Show/hide password">
+                <i class="fa-regular fa-eye"></i>
+              </button>
+            </div>
+            <p class="hint">
+              Find this in Supabase → Settings → Database → Connection string → URI.
+              Use the <strong>Transaction Pooler (port 6543)</strong>.
+            </p>
+          </div>
+        </div>
+
+        <!-- Google Sheets credentials -->
+        <div id="gs-section" style="display:none">
+          <div class="field">
+            <label for="gs-sheet-id">Google Sheet ID</label>
+            <input type="text" id="gs-sheet-id" name="gs-sheet-id" autocomplete="off"
+                   placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms">
+            <p class="hint">
+              The long ID from your Google Sheet's URL between <code>/d/</code> and <code>/edit</code>.
+            </p>
+          </div>
+          <div class="field">
+            <label for="gs-creds">Service Account Credentials (JSON)</label>
+            <textarea id="gs-creds" name="gs-creds" rows="7"
+                      placeholder='{ "type": "service_account", ... }'></textarea>
+            <div class="field-error" id="gs-creds-error">Invalid JSON — please paste the full contents of your .json key file.</div>
+            <p class="hint">
+              Paste the full contents of your service account <code>.json</code> key file.
+            </p>
+          </div>
+        </div>
+
+        <!-- Error banner above submit -->
+        <div class="submit-error" id="submit-error">
+          Submission failed. Please check your details and try again, or contact
+          <a href="mailto:support@botivate.in" style="color:#fca5a5">support@botivate.in</a>.
+        </div>
+
+        <button type="submit" class="btn-primary" id="submit-btn">Submit Credentials</button>
+      </form>
+    </div>
+
+    <!-- Success state -->
+    <div id="success-state" style="display:none">
+      <div class="success-icon"><i class="fa-solid fa-check"></i></div>
+      <h2>Credentials Received</h2>
+      <p id="success-message">
+        Thank you. Your credentials have been securely submitted. The Botivate team will review
+        and activate your account within 24 hours. You will receive a confirmation on WhatsApp
+        or Telegram once setup is complete.
+      </p>
+    </div>
+
+  </div><!-- /.card -->
+
+  <footer>Powered by Botivate | <a href="mailto:support@botivate.in">support@botivate.in</a></footer>
+
+  <script>
+    // Token lives in memory only — never written to localStorage or cookies.
+    let _token = null;
+    let _contextData = null; // full API response
+    let _selectedProduct = null; // { slug, db_type, display_name }
+
+    // ── Bootstrap ──────────────────────────────────────────────────────────────
+    (async function init() {
+      const params = new URLSearchParams(location.search);
+      _token = params.get('token');
+
+      if (!_token) {
+        showError('Invalid link. Please contact Botivate support.');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/onboard/context?token=${encodeURIComponent(_token)}`);
+        if (res.status === 401 || res.status === 403 || !res.ok) {
+          showError('This link has expired or is invalid. Please contact Botivate support.');
+          return;
+        }
+        _contextData = await res.json();
+        renderForm(_contextData);
+      } catch (_) {
+        showError('This link has expired or is invalid. Please contact Botivate support.');
+      }
+    })();
+
+    // ── Render form from context ───────────────────────────────────────────────
+    function renderForm(ctx) {
+      // Header
+      document.getElementById('form-heading').textContent =
+        `Welcome, ${ctx.contact_name} from ${ctx.company_name}!`;
+
+      const products = ctx.products || [];
+      const productField = document.getElementById('product-field');
+
+      if (products.length === 1) {
+        _selectedProduct = products[0];
+        productField.innerHTML =
+          `<label>Product</label>` +
+          `<div class="readonly-value">${escHtml(_selectedProduct.display_name)}</div>` +
+          `<input type="hidden" id="product-slug-hidden" value="${escHtml(_selectedProduct.slug)}">`;
+      } else {
+        // Multi-product: build select
+        const options = products.map(p =>
+          `<option value="${escHtml(p.slug)}" data-dbtype="${escHtml(p.db_type)}"` +
+          ` data-display="${escHtml(p.display_name)}">${escHtml(p.display_name)}</option>`
+        ).join('');
+        productField.innerHTML =
+          `<label for="product-select">Select Product</label>` +
+          `<select id="product-select">${options}</select>`;
+        _selectedProduct = products[0];
+        document.getElementById('product-select').addEventListener('change', onProductChange);
+      }
+
+      applyDbType(_selectedProduct.db_type);
+
+      // Show form
+      document.getElementById('loading-state').style.display = 'none';
+      document.getElementById('form-state').style.display = 'block';
+    }
+
+    function onProductChange(e) {
+      const opt = e.target.selectedOptions[0];
+      _selectedProduct = {
+        slug: opt.value,
+        db_type: opt.dataset.dbtype,
+        display_name: opt.dataset.display,
+      };
+      applyDbType(_selectedProduct.db_type);
+    }
+
+    function applyDbType(dbType) {
+      const isPg = dbType === 'postgresql';
+      document.getElementById('db-type-label').textContent = isPg ? 'PostgreSQL' : 'Google Sheets';
+      document.getElementById('pg-section').style.display = isPg ? 'block' : 'none';
+      document.getElementById('gs-section').style.display = isPg ? 'none' : 'block';
+      // Clear validation state when switching
+      hideFieldError('gs-creds-error');
+    }
+
+    // ── Eye toggle ─────────────────────────────────────────────────────────────
+    function toggleEye(inputId, btn) {
+      const inp = document.getElementById(inputId);
+      const isHidden = inp.type === 'password';
+      inp.type = isHidden ? 'text' : 'password';
+      btn.querySelector('i').className = isHidden ? 'fa-regular fa-eye-slash' : 'fa-regular fa-eye';
+    }
+
+    // ── JSON validation on blur ────────────────────────────────────────────────
+    document.getElementById('gs-creds').addEventListener('blur', function () {
+      const val = this.value.trim();
+      if (!val) { hideFieldError('gs-creds-error'); return; }
+      try { JSON.parse(val); hideFieldError('gs-creds-error'); }
+      catch (_) { showFieldError('gs-creds-error'); }
+    });
+
+    // ── Form submission ────────────────────────────────────────────────────────
+    document.getElementById('onboard-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      hideSubmitError();
+
+      const dbType = _selectedProduct.db_type;
+      const slug = _selectedProduct.slug;
+
+      // Client-side validation
+      if (dbType === 'postgresql') {
+        const url = document.getElementById('pg-url').value.trim();
+        if (!url) { showSubmitError(); return; }
+      } else {
+        const sheetId = document.getElementById('gs-sheet-id').value.trim();
+        const creds = document.getElementById('gs-creds').value.trim();
+        if (!sheetId || !creds) { showSubmitError(); return; }
+        try { JSON.parse(creds); }
+        catch (_) { showFieldError('gs-creds-error'); return; }
+      }
+
+      const btn = document.getElementById('submit-btn');
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+
+      const body = {
+        token: _token,
+        product_slug: slug,
+        db_type: dbType,
+      };
+
+      if (dbType === 'postgresql') {
+        body.connection_url = document.getElementById('pg-url').value.trim();
+      } else {
+        body.sheet_id = document.getElementById('gs-sheet-id').value.trim();
+        body.google_credentials = document.getElementById('gs-creds').value.trim();
+      }
+
+      try {
+        const res = await fetch('/api/onboard/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+
+        if (res.ok) {
+          const contactName = _contextData ? _contextData.contact_name : 'there';
+          showSuccess(contactName);
+        } else {
+          showSubmitError();
+        }
+      } catch (_) {
+        showSubmitError();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Submit Credentials';
+      }
+    });
+
+    // ── State helpers ──────────────────────────────────────────────────────────
+    function showError(msg) {
+      document.getElementById('loading-state').style.display = 'none';
+      document.getElementById('form-state').style.display = 'none';
+      document.getElementById('error-message').textContent = msg;
+      document.getElementById('error-state').style.display = 'block';
+    }
+
+    function showSuccess(contactName) {
+      document.getElementById('success-message').textContent =
+        `Thank you, ${contactName}. Your credentials have been securely submitted. ` +
+        `The Botivate team will review and activate your account within 24 hours. ` +
+        `You will receive a confirmation on WhatsApp or Telegram once setup is complete.`;
+      document.getElementById('form-state').style.display = 'none';
+      document.getElementById('success-state').style.display = 'block';
+    }
+
+    function showSubmitError() {
+      document.getElementById('submit-error').classList.add('visible');
+    }
+    function hideSubmitError() {
+      document.getElementById('submit-error').classList.remove('visible');
+    }
+    function showFieldError(id) {
+      document.getElementById(id).classList.add('visible');
+    }
+    function hideFieldError(id) {
+      document.getElementById(id).classList.remove('visible');
+    }
+
+    function escHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>

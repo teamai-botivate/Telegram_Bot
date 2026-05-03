@@ -13,8 +13,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .admin import router as admin_router
+from .admin import router as admin_router, sync_router as admin_sync_router
 from .database import create_tables
+from .routers.onboarding import router as onboarding_router
 from .webhook import router as webhook_router
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ app.add_middleware(
 
 app.include_router(webhook_router)
 app.include_router(admin_router)
+app.include_router(admin_sync_router)
+app.include_router(onboarding_router)
 
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 if os.path.exists(static_dir):
@@ -56,6 +59,15 @@ async def startup() -> None:
     # Do not block ASGI startup on database availability; Render health checks should pass quickly.
     asyncio.create_task(_initialize_db_metadata())
 
+    async def _start_main_db_sync() -> None:
+        try:
+            from .sync.main_db_sync import start_sync_scheduler
+            await start_sync_scheduler()
+        except Exception:
+            logger.exception("Failed to start Botivate Main DB sync scheduler.")
+
+    asyncio.create_task(_start_main_db_sync())
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -65,6 +77,12 @@ async def health() -> dict[str, str]:
 @app.on_event("shutdown")
 async def shutdown() -> None:
 	from .database import _tenant_pools
+	from .sync.main_db_sync import stop_sync_scheduler
+
+	try:
+		await stop_sync_scheduler()
+	except Exception:
+		logger.exception("Error stopping Botivate Main DB sync scheduler.")
 
 	for tid, pool in list(_tenant_pools.items()):
 		try:

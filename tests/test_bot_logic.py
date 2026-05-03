@@ -29,6 +29,12 @@ def mock_postgres_runtime_schema(monkeypatch) -> None:
         "fetch_tenant_postgres_runtime_schema",
         AsyncMock(return_value=(DEFAULT_POSTGRES_RUNTIME_SCHEMA, "Runtime hints")),
     )
+    # After Prompt 6, the per-DB pipeline reads schema via the credential-targeted helper.
+    monkeypatch.setattr(
+        bot_logic,
+        "fetch_credential_postgres_runtime_schema",
+        AsyncMock(return_value=(DEFAULT_POSTGRES_RUNTIME_SCHEMA, "Runtime hints")),
+    )
 
 
 @pytest.mark.asyncio
@@ -37,13 +43,15 @@ async def test_handle_message_sends_account_not_found_when_tenant_missing(monkey
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=None))
+    # Prompt 3 added a Tier-2 lookup before the "not registered" reply.
+    monkeypatch.setattr(bot_logic, "find_registered_client_by_chat", AsyncMock(return_value=None))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Hello")
     await bot_logic.handle_message(message)
 
     send_reply_mock.assert_awaited_once_with(
         message,
-        "Hi! I couldn't find your account. Please contact support.",
+        "Hi! I couldn't find your account. Please contact the Botivate team to get registered.",
     )
 
 
@@ -69,6 +77,10 @@ async def test_handle_message_off_topic_skips_db(monkeypatch) -> None:
 async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `orders` | Columns: id (uuid), status (text)"
@@ -79,11 +91,11 @@ async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) 
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id, status FROM orders LIMIT 10"))
     monkeypatch.setattr(
         bot_logic,
-        "execute_tenant_query",
+        "execute_credential_query",
         AsyncMock(return_value=[{"id": "abc", "status": "dispatched"}]),
     )
     monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="Your order is dispatched."))
@@ -101,6 +113,10 @@ async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) 
 async def test_handle_message_tenant_query_error(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `orders` | Columns: id (uuid)"
@@ -110,9 +126,9 @@ async def test_handle_message_tenant_query_error(monkeypatch) -> None:
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id FROM orders"))
-    monkeypatch.setattr(bot_logic, "execute_tenant_query", AsyncMock(side_effect=QueryExecutionError("DB down")))
+    monkeypatch.setattr(bot_logic, "execute_credential_query", AsyncMock(side_effect=QueryExecutionError("DB down")))
     monkeypatch.setattr(bot_logic, "fix_sql", AsyncMock(side_effect=ValueError("bad fix")))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Show status")
@@ -125,6 +141,10 @@ async def test_handle_message_tenant_query_error(monkeypatch) -> None:
 async def test_handle_message_retries_query_with_repaired_sql(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `calendar` | Columns: date (date), is_working (bool)",
@@ -140,10 +160,10 @@ async def test_handle_message_retries_query_with_repaired_sql(monkeypatch) -> No
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT work_date FROM calendar"))
     monkeypatch.setattr(bot_logic, "fix_sql", AsyncMock(return_value="SELECT date, is_working FROM calendar LIMIT 50"))
-    monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
+    monkeypatch.setattr(bot_logic, "execute_credential_query", execute_mock)
     monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="Here is your working calendar."))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="working calendar")
@@ -157,6 +177,10 @@ async def test_handle_message_retries_query_with_repaired_sql(monkeypatch) -> No
 async def test_handle_message_database_connection_error_has_clear_message(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `orders` | Columns: id (uuid)",
@@ -166,11 +190,11 @@ async def test_handle_message_database_connection_error_has_clear_message(monkey
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id FROM orders"))
     monkeypatch.setattr(
         bot_logic,
-        "execute_tenant_query",
+        "execute_credential_query",
         AsyncMock(side_effect=TenantDBConnectionError("timeout")),
     )
 
@@ -364,6 +388,10 @@ async def test_generate_sql_query_includes_conversation_context(monkeypatch) -> 
 async def test_handle_message_expands_generic_count_query_across_tables(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint=(
@@ -379,13 +407,13 @@ async def test_handle_message_expands_generic_count_query_across_tables(monkeypa
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(
         bot_logic,
         "generate_sql_query",
         AsyncMock(return_value="SELECT COUNT(*) FROM checklist AS c WHERE c.given_by ILIKE '%admin%'"),
     )
-    monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
+    monkeypatch.setattr(bot_logic, "execute_credential_query", execute_mock)
     monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="There is 1 task assigned by Admin."))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="How many tasks are assigned by Admin?")
@@ -402,6 +430,10 @@ async def test_handle_message_expands_generic_count_query_across_tables(monkeypa
 async def test_handle_message_repairs_distinct_window_before_explain(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `users`\nColumns: user_name (text)",
@@ -419,7 +451,7 @@ async def test_handle_message_repairs_distinct_window_before_explain(monkeypatch
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(
         bot_logic,
         "generate_sql_query",
@@ -432,8 +464,8 @@ async def test_handle_message_repairs_distinct_window_before_explain(monkeypatch
         ),
     )
     monkeypatch.setattr(bot_logic, "fix_sql", AsyncMock(return_value=fixed_sql))
-    monkeypatch.setattr(bot_logic, "explain_validate_sql", explain_mock)
-    monkeypatch.setattr(bot_logic, "execute_tenant_query", execute_mock)
+    monkeypatch.setattr(bot_logic, "explain_validate_sql_for_credential", explain_mock)
+    monkeypatch.setattr(bot_logic, "execute_credential_query", execute_mock)
     monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(return_value="user: 1"))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Show user count")
@@ -486,6 +518,10 @@ async def test_openai_formatting_uses_max_completion_tokens(monkeypatch) -> None
 async def test_handle_message_uses_fallback_rows_when_formatting_fails(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `orders` | Columns: id (uuid), status (text)",
@@ -495,11 +531,11 @@ async def test_handle_message_uses_fallback_rows_when_formatting_fails(monkeypat
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id, status FROM orders LIMIT 10"))
     monkeypatch.setattr(
         bot_logic,
-        "execute_tenant_query",
+        "execute_credential_query",
         AsyncMock(return_value=[{"id": "o-1", "status": "done"}]),
     )
     monkeypatch.setattr(bot_logic, "format_sql_response", AsyncMock(side_effect=RuntimeError("formatter down")))
@@ -514,6 +550,10 @@ async def test_handle_message_uses_fallback_rows_when_formatting_fails(monkeypat
 async def test_handle_message_no_results(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name=None,
+        product_slug=None,
+        auto_schema_hints=None,
         db_type="postgresql",
         connection_url="encrypted_url",
         schema_blueprint="Table `orders` | Columns: id (uuid)"
@@ -523,9 +563,9 @@ async def test_handle_message_no_results(monkeypatch) -> None:
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=credentials))
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[credentials]))
     monkeypatch.setattr(bot_logic, "generate_sql_query", AsyncMock(return_value="SELECT id FROM orders"))
-    monkeypatch.setattr(bot_logic, "execute_tenant_query", AsyncMock(return_value=[]))
+    monkeypatch.setattr(bot_logic, "execute_credential_query", AsyncMock(return_value=[]))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Show status")
     await bot_logic.handle_message(message)
@@ -541,9 +581,14 @@ async def test_handle_message_no_credentials(monkeypatch) -> None:
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
-    monkeypatch.setattr(bot_logic, "get_tenant_credentials", AsyncMock(return_value=None))
+    # Tenant exists but has no credential rows — router returns []; copy moved to a
+    # routing-specific message in Prompt 6.
+    monkeypatch.setattr(bot_logic, "get_tenant_credentials_all", AsyncMock(return_value=[]))
 
     message = BotMessage(platform=Platform.TELEGRAM, chat_id="123456789", text="Hello")
     await bot_logic.handle_message(message)
 
-    send_reply_mock.assert_awaited_once_with(message, "Your database connection is not fully configured.")
+    send_reply_mock.assert_awaited_once_with(
+        message,
+        "I couldn't determine which database to query. Please rephrase.",
+    )

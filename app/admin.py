@@ -28,6 +28,7 @@ load_dotenv()
 ADMIN_SECRET_TOKEN = os.getenv("ADMIN_SECRET_TOKEN", "")
 
 router = APIRouter(prefix="/admin/tenant", tags=["admin"])
+sync_router = APIRouter(prefix="/admin/sync", tags=["admin-sync"])
 
 
 # ─── Request Models ─────────────────────────────────────────────────────────────
@@ -401,3 +402,16 @@ async def delete_tenant_example(
         )
 
     return {"deleted": str(deleted_id)}
+
+
+# ─── Sync routes ─────────────────────────────────────────────────────────────
+
+
+@sync_router.post("/registered-clients")
+async def trigger_registered_clients_sync(
+    _: None = Depends(verify_admin_token),
+) -> dict[str, Any]:
+    """Run the Botivate Main DB → NeonDB allowlist sync on demand."""
+    from .sync.main_db_sync import sync_registered_clients
+
+    return await sync_registered_clients()
