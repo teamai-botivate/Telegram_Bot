@@ -65,6 +65,54 @@ def test_sanitize_select_sql_rejects_non_select() -> None:
         database._sanitize_select_sql("DELETE FROM users")
 
 
+def test_google_sheet_targeted_matches_count_rows_across_any_sheet_schema() -> None:
+    profiles = [
+        {
+            "title": "Checklist",
+            "rows": [
+                {
+                    "row_number": 19,
+                    "values": {
+                        "Given By": "Kavit Passary",
+                        "Doer Name": "Anita Rathaur",
+                        "Task Description": "Audit Closure Checklist",
+                    },
+                },
+                {
+                    "row_number": 20,
+                    "values": {
+                        "Given By": "Kavit Passary",
+                        "Doer Name": "Ahitesh Tandan",
+                        "Task Description": "Payroll Formula Setup",
+                    },
+                },
+            ],
+        },
+        {
+            "title": "Delegation",
+            "rows": [
+                {
+                    "row_number": 2,
+                    "values": {
+                        "Assigned By": "Other Person",
+                        "Owner": "Anita Rathaur",
+                    },
+                }
+            ],
+        },
+    ]
+
+    context = database._build_google_sheet_targeted_match_context(
+        profiles,
+        "How many tasks are assigned by Kavit Passary to Anita Rathaur?",
+    )
+
+    assert "Matched cell values from question: ['Kavit Passary', 'Anita Rathaur']" in context
+    assert "Sheet `Checklist`: 1 rows contain all matched cell values." in context
+    assert "Row 19" in context
+    assert "Sheet `Delegation`: 0 rows contain all matched cell values." in context
+
+
 @pytest.mark.asyncio
 async def test_execute_tenant_query_executes_query_via_pool(monkeypatch) -> None:
     connection = SimpleNamespace(

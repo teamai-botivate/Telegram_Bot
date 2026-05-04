@@ -982,18 +982,18 @@ def _fallback_postgres_metadata(runtime_schema: str) -> dict[str, Any]:
 	}
 
 
-def _analyze_postgres_schema(runtime_schema: str) -> dict[str, Any]:
+async def _analyze_postgres_schema(runtime_schema: str) -> dict[str, Any]:
 	api_key = os.getenv("OPENAI_API_KEY", "").strip()
 	if not api_key:
 		logger.warning("OPENAI_API_KEY not configured; using deterministic PostgreSQL metadata fallback.")
 		return _fallback_postgres_metadata(runtime_schema)
 
 	try:
-		from openai import OpenAI
+		from openai import AsyncOpenAI
 
 		model_name = os.getenv("POSTGRES_SCHEMA_ANALYSIS_MODEL", os.getenv("SQL_GENERATION_MODEL", "gpt-5.2"))
-		client = OpenAI(api_key=api_key)
-		response = client.chat.completions.create(
+		client = AsyncOpenAI(api_key=api_key)
+		response = await client.chat.completions.create(
 			model=model_name,
 			temperature=0,
 			response_format={"type": "json_object"},
@@ -1015,7 +1015,7 @@ def _analyze_postgres_schema(runtime_schema: str) -> dict[str, Any]:
 async def fetch_postgres_schema(connection_string: str) -> tuple[str, str]:
 	"""Return metadata_analysis.json-style schema blueprint plus auto hints."""
 	runtime_schema, auto_hints = await fetch_postgres_runtime_schema(connection_string)
-	metadata_analysis = _analyze_postgres_schema(runtime_schema)
+	metadata_analysis = await _analyze_postgres_schema(runtime_schema)
 	blueprint = json.dumps(metadata_analysis, indent=2, ensure_ascii=False)
 	return blueprint, auto_hints
 
@@ -1062,7 +1062,7 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		if not google_credentials:
 			raise ValueError("Google Sheets credentials are not configured.")
 		sheet_id = connection_url.replace("google_sheets://", "")
-		blueprint, auto_hints = fetch_google_sheet_data(sheet_id, google_credentials)
+		blueprint, auto_hints = await fetch_google_sheet_data(sheet_id, google_credentials)
 	else:
 		raise ValueError("Schema refresh is supported only for PostgreSQL and Google Sheets tenants.")
 
@@ -1435,6 +1435,90 @@ def _collect_google_sheet_profiles(spreadsheet: Any) -> tuple[list[dict[str, Any
 	return profiles, pending_rule + "\n" + "\n".join(hint_lines)
 
 
+def _normalize_sheet_match_text(value: Any) -> str:
+	return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _question_contains_sheet_value(question_norm: str, value_norm: str) -> bool:
+	if not value_norm:
+		return False
+	if len(value_norm) <= 3 or re.fullmatch(r"[\w.-]+", value_norm):
+		return bool(re.search(rf"(?<!\w){re.escape(value_norm)}(?!\w)", question_norm))
+	return value_norm in question_norm
+
+
+def _is_sheet_match_candidate(value: Any) -> bool:
+	text = str(value or "").strip()
+	if len(text) < 2 or len(text) > 80:
+		return False
+	if text.lower() in {"yes", "no", "true", "false", "n/a", "na", "none", "-"}:
+		return False
+	return bool(re.search(r"[A-Za-z0-9]", text))
+
+
+def _extract_question_sheet_values(profiles: list[dict[str, Any]], question: str) -> list[str]:
+	question_norm = _normalize_sheet_match_text(question)
+	matched: list[str] = []
+	seen: set[str] = set()
+
+	for profile in profiles:
+		for row in profile.get("rows", []):
+			values = row.get("values", {}) if isinstance(row, dict) else {}
+			for value in values.values():
+				if not _is_sheet_match_candidate(value):
+					continue
+				value_text = str(value).strip()
+				value_norm = _normalize_sheet_match_text(value_text)
+				if value_norm in seen:
+					continue
+				if _question_contains_sheet_value(question_norm, value_norm):
+					seen.add(value_norm)
+					matched.append(value_text)
+
+	return sorted(matched, key=len, reverse=True)
+
+
+def _build_google_sheet_targeted_match_context(
+	profiles: list[dict[str, Any]],
+	question: str | None,
+	max_rows_per_sheet: int = 20,
+) -> str:
+	"""Return exact-value row matches computed from all loaded sheet rows.
+
+	This is schema-agnostic: it looks for concrete cell values mentioned in the
+	user question, then counts rows per worksheet containing all those values.
+	"""
+	if not question:
+		return ""
+
+	matched_values = _extract_question_sheet_values(profiles, question)
+	if not matched_values:
+		return ""
+
+	matched_norms = [_normalize_sheet_match_text(value) for value in matched_values]
+	lines: list[str] = [
+		"TARGETED ROW MATCHES FOR CURRENT QUESTION (computed from all worksheet rows before snapshot truncation):",
+		f"Matched cell values from question: {matched_values}",
+	]
+
+	for profile in profiles:
+		sheet_matches: list[dict[str, Any]] = []
+		for row in profile.get("rows", []):
+			values = row.get("values", {}) if isinstance(row, dict) else {}
+			row_blob = "\n".join(_normalize_sheet_match_text(value) for value in values.values())
+			if all(value_norm in row_blob for value_norm in matched_norms):
+				sheet_matches.append(row)
+
+		title = profile.get("title", "Untitled")
+		lines.append(f"Sheet `{title}`: {len(sheet_matches)} rows contain all matched cell values.")
+		for row in sheet_matches[:max_rows_per_sheet]:
+			lines.append(f"  Row {row.get('row_number', '?')}: {row.get('values', {})}")
+		if len(sheet_matches) > max_rows_per_sheet:
+			lines.append(f"  {len(sheet_matches) - max_rows_per_sheet} additional matching rows omitted.")
+
+	return "\n".join(lines)
+
+
 def _google_sheet_schema_report(spreadsheet_title: str, profiles: list[dict[str, Any]]) -> str:
 	lines = [
 		f"# Schema Report: {spreadsheet_title}",
@@ -1519,18 +1603,18 @@ def _fallback_google_sheet_metadata(spreadsheet_title: str, profiles: list[dict[
 	}
 
 
-def _analyze_google_sheet_schema(spreadsheet_title: str, schema_report: str, profiles: list[dict[str, Any]]) -> dict[str, Any]:
+async def _analyze_google_sheet_schema(spreadsheet_title: str, schema_report: str, profiles: list[dict[str, Any]]) -> dict[str, Any]:
 	api_key = os.getenv("OPENAI_API_KEY", "").strip()
 	if not api_key:
 		logger.warning("OPENAI_API_KEY not configured; using deterministic Google Sheets metadata fallback.")
 		return _fallback_google_sheet_metadata(spreadsheet_title, profiles)
 
 	try:
-		from openai import OpenAI
+		from openai import AsyncOpenAI
 
 		model_name = os.getenv("GOOGLE_SHEETS_SCHEMA_ANALYSIS_MODEL", os.getenv("SQL_GENERATION_MODEL", "gpt-5.2"))
-		client = OpenAI(api_key=api_key)
-		response = client.chat.completions.create(
+		client = AsyncOpenAI(api_key=api_key)
+		response = await client.chat.completions.create(
 			model=model_name,
 			temperature=0,
 			response_format={"type": "json_object"},
@@ -1549,27 +1633,45 @@ def _analyze_google_sheet_schema(spreadsheet_title: str, schema_report: str, pro
 		return _fallback_google_sheet_metadata(spreadsheet_title, profiles)
 
 
-def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:
+async def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple[str, str]:
 	"""Return metadata_analysis.json-style schema blueprint plus auto hints.
 
 	The stored schema_blueprint must stay semantic metadata only. Live row data is
 	fetched separately at message time by fetch_google_sheet_runtime_context().
+
+	gspread is synchronous and will block the event loop, so the fetch + profile
+	stages are run in a thread pool. The OpenAI call uses AsyncOpenAI directly.
 	"""
-	spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
-	profiles, hints = _collect_google_sheet_profiles(spreadsheet)
-	schema_report = _google_sheet_schema_report(spreadsheet.title, profiles)
-	metadata_analysis = _analyze_google_sheet_schema(spreadsheet.title, schema_report, profiles)
+	def _gspread_blocking() -> tuple[str, str, list[dict[str, Any]], str]:
+		spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
+		profiles, hints = _collect_google_sheet_profiles(spreadsheet)
+		schema_report = _google_sheet_schema_report(spreadsheet.title, profiles)
+		return spreadsheet.title, schema_report, profiles, hints
+
+	# asyncio.to_thread keeps the event loop responsive (health checks, other requests)
+	# while gspread does its blocking I/O.
+	spreadsheet_title, schema_report, profiles, hints = await asyncio.to_thread(_gspread_blocking)
+	metadata_analysis = await _analyze_google_sheet_schema(spreadsheet_title, schema_report, profiles)
 	blueprint = json.dumps(metadata_analysis, indent=2, ensure_ascii=False)
 	return blueprint, hints
 
 
-def fetch_google_sheet_runtime_context(sheet_id: str, credentials_json: str) -> tuple[str, str]:
+def fetch_google_sheet_runtime_context(
+	sheet_id: str,
+	credentials_json: str,
+	question: str | None = None,
+) -> tuple[str, str]:
 	"""Return live Google Sheets rows for answering. This output is not stored."""
 	spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
 	profiles, hints = _collect_google_sheet_profiles(spreadsheet)
 	row_limit = int(os.getenv("GOOGLE_SHEETS_CONTEXT_ROW_LIMIT", "200"))
 
 	lines: list[str] = [f"Google Sheets Live Data Context: {spreadsheet.title}", ""]
+	targeted_matches = _build_google_sheet_targeted_match_context(profiles, question)
+	if targeted_matches:
+		lines.append(targeted_matches)
+		lines.append("")
+
 	for profile in profiles:
 		lines.append(f"Sheet `{profile['title']}` | Rows: ~{profile['row_count']}")
 		lines.append(f"Description: {profile['description']}")

@@ -120,10 +120,9 @@ async def test_create_full_success(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_create_full_google_sheets_success(monkeypatch) -> None:
-    from unittest.mock import MagicMock
     monkeypatch.setattr(admin, "ADMIN_SECRET_TOKEN", "secret")
 
-    mock_fetch = MagicMock(return_value=("Google Sheets Blueprint", "Snapshot data"))
+    mock_fetch = AsyncMock(return_value=("Google Sheets Blueprint", "Snapshot data"))
     monkeypatch.setattr(admin, "fetch_google_sheet_data", mock_fetch)
 
     mock_create = AsyncMock(return_value="gs-tenant-uuid")
@@ -150,7 +149,7 @@ async def test_create_full_google_sheets_success(monkeypatch) -> None:
     assert data["status"] == "created"
     assert data["tenant_id"] == "gs-tenant-uuid"
 
-    mock_fetch.assert_called_once_with("test_sheet_id", '{"type": "service_account"}')
+    mock_fetch.assert_awaited_once_with("test_sheet_id", '{"type": "service_account"}')
     mock_save.assert_awaited_once()
 
     call_kwargs = mock_save.call_args.kwargs

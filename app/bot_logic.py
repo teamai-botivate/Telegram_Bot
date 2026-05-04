@@ -613,11 +613,14 @@ PLANNING INSTRUCTIONS:
 6. Ignore tables starting with "extensions." or "pg_"
 7. MULTI-TABLE: If the question asks about multiple tables,
    query each table separately with UNION ALL.
-8. FOLLOW-UP QUESTIONS: If RECENT CHAT CONTEXT shows the user was asking
+8. USER TEXT VALUES: For names, labels, people, customers, tasks, or other
+   text values mentioned by the user, plan case-insensitive/trimmed matching
+   rather than raw exact equality.
+9. FOLLOW-UP QUESTIONS: If RECENT CHAT CONTEXT shows the user was asking
    about pending/status/table filters and the current question is short
    (for example "Task in delegation?"), preserve those constraints unless
    the current question clearly changes them.
-9. COUNT + WHO/BY WHOM: If the user asks for a count and also asks who
+10. COUNT + WHO/BY WHOM: If the user asks for a count and also asks who
    gave/assigned/owns those records, GROUP BY the giver/assignee/owner
    column and return one row per group. Do not collapse multiple people
    into one arbitrary value.
@@ -721,6 +724,8 @@ SQL REQUIREMENTS:
 - Declare aliases: FROM table AS alias
 - Never use SELECT * — list columns explicitly
 - ILIKE for text searches, = TRUE/FALSE for booleans
+- For exact user-provided text/name values, prefer
+  LOWER(TRIM(text_column)) = LOWER(TRIM('value')) so case or extra spaces do not hide matches.
 - IS NULL / IS NOT NULL for nullable dates
 - LEFT JOIN preferred over INNER JOIN
 - Only use columns that exist in the schema
@@ -764,6 +769,8 @@ COMMON FIXES:
 - Alias not found: declare alias in FROM/JOIN clause first
 - Column not found: check exact column name in schema above
 - Boolean column: use = TRUE or = FALSE, never ILIKE
+- Text/name equality: use LOWER(TRIM(column)) = LOWER(TRIM('value'))
+  instead of raw column = 'value' when matching user-provided names or labels
 - Nullable column: use IS NULL or IS NOT NULL
 - DISTINCT window count: PostgreSQL does not support COUNT(DISTINCT ...) OVER ().
   Put SELECT DISTINCT in a subquery, then use COUNT(*) OVER () in the outer query.
@@ -1195,7 +1202,7 @@ async def _run_sheets_pipeline_for_credential(
         return {"status": "error"}
 
     try:
-        live_context, gs_hints = fetch_google_sheet_runtime_context(sheet_id, creds_json)
+        live_context, gs_hints = fetch_google_sheet_runtime_context(sheet_id, creds_json, question=msg.text)
     except Exception as e:
         logger.error("Google Sheets fetch failed for credential=%s: %s", credential.id, e)
         return {"status": "connection_error"}
@@ -1219,6 +1226,8 @@ RULES AND SEMANTIC HINTS:
 {sheet_filters}
 ANSWERING RULES:
 - Treat each worksheet/tab as a table.
+- If TARGETED ROW MATCHES are present, use those per-sheet counts/rows first.
+  They are computed from all worksheet rows before the displayed snapshot is truncated.
 - Use the FULL DATA SNAPSHOT rows as the source of truth for answers.
 - Sample rows are only examples of structure; do not answer from samples when full rows are available.
 - If the question names a sheet/tab, use that sheet first. Otherwise choose the sheet whose description and headers best match the question.

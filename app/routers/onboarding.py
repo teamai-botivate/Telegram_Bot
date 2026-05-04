@@ -6,6 +6,7 @@ These are mounted at /api/onboard. Authentication is JWT-only — passed in the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -245,7 +246,7 @@ async def submit(payload: OnboardSubmitRequest) -> JSONResponse:
             )
             return _err_with_message(400, "connection_failed", friendly_error)
 
-    # ── 5. Schema introspection ────────────────────────────────────────────
+    # ── 5. Schema introspection (now non-blocking — uses AsyncOpenAI + to_thread) ─
     schema_blueprint: str | None = None
     auto_schema_hints: str | None = None
 
@@ -256,17 +257,13 @@ async def submit(payload: OnboardSubmitRequest) -> JSONResponse:
             logger.exception("[ONBOARD] Postgres schema introspection failed.")
             return _err_with_message(400, "schema_introspection_failed", str(exc))
     else:
-        # Per spec: skip introspection for Google Sheets at submit time. Admin can
-        # trigger /admin/tenant/{id}/refresh-schema after activation.
         try:
-            schema_blueprint, auto_schema_hints = fetch_google_sheet_data(
+            schema_blueprint, auto_schema_hints = await fetch_google_sheet_data(
                 payload.sheet_id, payload.google_credentials
             )
-        except Exception:
-            # Don't block submission on Sheets schema failure — store empty and let admin refresh.
-            logger.exception("[ONBOARD] Google Sheets schema introspection failed; storing empty blueprint.")
-            schema_blueprint = ""
-            auto_schema_hints = ""
+        except Exception as exc:
+            logger.exception("[ONBOARD] Google Sheets schema introspection failed.")
+            return _err_with_message(400, "schema_introspection_failed", str(exc))
 
     # ── 6. Encrypt credentials ─────────────────────────────────────────────
     if db_type == "postgresql":
