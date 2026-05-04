@@ -7,7 +7,6 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
 from dotenv import load_dotenv
 try:
     from openai import AsyncOpenAI
@@ -39,13 +38,11 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
-MISTRAL_CHAT_COMPLETIONS_URL = "https://api.mistral.ai/v1/chat/completions"
-MISTRAL_CLASSIFIER_MODEL = os.getenv("MISTRAL_CLASSIFIER_MODEL", "mistral-large-2512")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-5.2")
 RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "gpt-5.2")
 DB_ROUTER_MODEL = os.getenv("DB_ROUTER_MODEL", "gpt-4o-mini")
+OFF_TOPIC_CLASSIFIER_MODEL = os.getenv("OFF_TOPIC_CLASSIFIER_MODEL", DB_ROUTER_MODEL)
 ENABLE_QUERY_LEARNING = os.getenv("ENABLE_QUERY_LEARNING", "true").strip().lower() == "true"
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
@@ -71,49 +68,24 @@ def _get_openai_client() -> AsyncOpenAI:
     return _openai_client
 
 
-def _extract_assistant_text(response_data: dict[str, Any]) -> str:
-    choices = response_data.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-
-    message = choices[0].get("message")
-    if not isinstance(message, dict):
-        return ""
-
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.strip()
-
-    return ""
-
-
-async def _call_mistral(messages: list[dict[str, str]], max_tokens: int, model: str) -> str:
-    if not MISTRAL_API_KEY:
-        raise RuntimeError("MISTRAL_API_KEY is not configured in .env.")
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }
-    headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        response = await client.post(MISTRAL_CHAT_COMPLETIONS_URL, headers=headers, json=payload)
-
-    response.raise_for_status()
-    response_data = response.json()
-    assistant_text = _extract_assistant_text(response_data)
-    return assistant_text or ""
-
-
 async def _call_openai_sql(system_prompt: str, user_prompt: str) -> str:
     client = _get_openai_client()
     completion = await client.chat.completions.create(
         model=SQL_GENERATION_MODEL,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    content = completion.choices[0].message.content
+    return (content or "").strip()
+
+
+async def _call_openai_classifier(system_prompt: str, user_prompt: str) -> str:
+    client = _get_openai_client()
+    completion = await client.chat.completions.create(
+        model=OFF_TOPIC_CLASSIFIER_MODEL,
         temperature=0,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -369,7 +341,7 @@ def _asks_for_everything(question: str) -> bool:
 
 
 async def is_off_topic(text: str) -> bool:
-    prompt = (
+    system_prompt = (
         "You are a classifier for a business database chatbot.\n"
         "The user can ask about ANY data that might exist in their company database.\n"
         "This includes but is not limited to:\n"
@@ -383,16 +355,11 @@ async def is_off_topic(text: str) -> bool:
         "- any data lookup by name, date, status, or ID\n\n"
         "Reply YES if the message is asking about data that could exist in a business database.\n"
         "Reply NO only if the message is clearly personal chat, jokes, general knowledge, "
-        "weather, news, or completely unrelated to any business data.\n\n"
-        f"Message: {text}\n"
-        "Answer (YES or NO):"
+        "weather, news, or completely unrelated to any business data.\n"
+        "Return only YES or NO."
     )
     try:
-        answer = await _call_mistral(
-            [{"role": "user", "content": prompt}],
-            max_tokens=5,
-            model=MISTRAL_CLASSIFIER_MODEL,
-        )
+        answer = await _call_openai_classifier(system_prompt, f"Message: {text}\nAnswer:")
     except Exception as exc:
         logger.warning("Off-topic detection failed open: %s", exc)
         return False
@@ -817,7 +784,7 @@ def _validate_generated_sql(sql: str) -> str:
         raise ValueError("Generated SQL is empty.")
 
     lowered = cleaned.lower()
-    if not lowered.startswith("select"):
+    if not (lowered.startswith("select") or lowered.startswith("with")):
         raise ValueError("Generated SQL is not a SELECT statement.")
 
     blocked_patterns = (
