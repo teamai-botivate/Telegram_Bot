@@ -535,77 +535,6 @@ def _maybe_expand_count_query_across_tables(sql: str, schema_blueprint: str, que
     )
 
 
-async def _plan_query(
-    schema_blueprint: str,
-    question: str,
-    auto_schema_hints: str | None = None,
-    similar_questions_block: str = "",
-    conversation_context_block: str = "",
-) -> str:
-    """Step 1 of Chain-of-Thought: Analyze the schema and produce a structured
-    query plan WITHOUT writing any SQL. Works with any tenant schema."""
-    if auto_schema_hints and auto_schema_hints.strip():
-        hints_section = auto_schema_hints.strip()
-    else:
-        hints_section = "No auto-inferred schema rules available."
-
-    # Pre-compute person name filters from the tenant's own data values
-    person_filter = _extract_name_filters(question, auto_schema_hints)
-
-    plan_prompt = f"""Analyze the question and schema. Output a QUERY PLAN only — no SQL.
-
-SCHEMA:
-{schema_blueprint}
-{similar_questions_block}
-{conversation_context_block}
-RULES:
-{hints_section}
-{person_filter}
-QUESTION: {question}
-
-PLANNING INSTRUCTIONS:
-1. DISTINCT: If the question asks "how many people/employees/workers"
-   or "list/name the people" — use COUNT(DISTINCT column) or
-   SELECT DISTINCT. A table may have many rows per person.
-2. Only use tables and columns that EXIST in the schema above.
-3. PENDING/STATUS: Look at the schema sample values.
-   - If a column has values like 'pending','completed','not started'
-     → filter by that text column
-   - If schema rules say "column IS NULL = pending"
-     → use IS NULL on that date column
-4. If a PERSON FILTER section appears above, you MUST include
-   those exact WHERE conditions in your FILTERS output.
-5. For boolean columns → TRUE/FALSE, never text
-6. Ignore tables starting with "extensions." or "pg_"
-7. MULTI-TABLE: If the question asks about multiple tables,
-   query each table separately with UNION ALL.
-8. USER TEXT VALUES: For names, labels, people, customers, tasks, or other
-   text values mentioned by the user, plan case-insensitive/trimmed matching
-   rather than raw exact equality.
-9. FOLLOW-UP QUESTIONS: If RECENT CHAT CONTEXT shows the user was asking
-   about pending/status/table filters and the current question is short
-   (for example "Task in delegation?"), preserve those constraints unless
-   the current question clearly changes them.
-10. COUNT + WHO/BY WHOM: If the user asks for a count and also asks who
-   gave/assigned/owns those records, GROUP BY the giver/assignee/owner
-   column and return one row per group. Do not collapse multiple people
-   into one arbitrary value.
-
-OUTPUT FORMAT:
-TABLES: [tables to query]
-COLUMNS: [columns to SELECT — use DISTINCT if asking for unique values]
-FILTERS: [WHERE conditions — MUST include PERSON FILTER if present above]
-JOINS: [JOIN conditions, or "none"]
-AGGREGATION: [COUNT/SUM/AVG, use DISTINCT if counting unique, or "none"]
-ORDER: [ORDER BY, or "none"]
-LIMIT: [number or 50]
-REASONING: [1 sentence: why these tables and columns]""".strip()
-
-    plan = await _call_openai_sql(plan_prompt, f"Create a query plan for: {question}")
-    logger.info("[SQL_PLAN] %s", plan.replace("\n", " | "))
-    return plan
-
-
 async def generate_sql_query(
     company_name: str,
     schema_blueprint: str,
@@ -616,11 +545,8 @@ async def generate_sql_query(
     conversation_context_block: str = "",
     precomputed_embedding: list[float] | None = None,
 ) -> str:
-    """Two-step Chain-of-Thought SQL generation.
-
-    Step 1: Plan which tables, columns, filters, and joins to use.
-    Step 2: Convert the plan into a valid PostgreSQL SELECT query.
-
+    """Single-step Chain-of-Thought SQL generation.
+    Plans the query and outputs the final SQL in one LLM call.
     Fully multi-tenant — uses the tenant's own schema_blueprint and hints.
     """
     # ── Few-shot retrieval (best-effort; never raises) ──
@@ -650,16 +576,6 @@ async def generate_sql_query(
         few_shot_block = ""
         similar_questions_block = ""
 
-    # ── Step 1: Generate a structured query plan ──
-    plan = await _plan_query(
-        schema_blueprint,
-        question,
-        auto_schema_hints,
-        similar_questions_block=similar_questions_block,
-        conversation_context_block=conversation_context_block,
-    )
-
-    # ── Step 2: Convert plan to SQL ──
     entities = _extract_entities(question)
     entities_json = json.dumps(entities, default=str)
     dynamic_aliases = build_table_aliases(schema_blueprint)
@@ -670,50 +586,74 @@ async def generate_sql_query(
     else:
         hints_section = "No auto-inferred schema rules available."
 
-    system_prompt = f"""Convert this QUERY PLAN into a PostgreSQL SELECT query.
-Output ONLY raw SQL. No markdown, no backticks, no explanation, no semicolon.
-
-PLAN:
-{plan}
+    system_prompt = f"""You are an expert PostgreSQL database analyst for {company_name}.
+Analyze the question and schema, then think step-by-step to build a correct SELECT query.
 
 SCHEMA:
 {schema_blueprint}
-
-{few_shot_block}TABLE ALIASES: {dynamic_aliases}
+{similar_questions_block}
+{few_shot_block}
 {conversation_context_block}
+TABLE ALIASES: {dynamic_aliases}
 
 RULES:
 {hints_section}
 {person_filter}
+
+PLANNING INSTRUCTIONS:
+1. DISTINCT: If the question asks "how many people/employees/workers" or "list/name the people" — use COUNT(DISTINCT column) or SELECT DISTINCT.
+2. Only use tables and columns that EXIST in the schema above.
+3. PENDING/STATUS: Look at the schema sample values. Use IS NULL if hinted.
+4. If a PERSON FILTER section appears above, you MUST include those exact WHERE conditions.
+5. For boolean columns → TRUE/FALSE, never text.
+6. Ignore tables starting with "extensions." or "pg_".
+7. MULTI-TABLE: If the question asks about multiple tables, query each table separately with UNION ALL.
+8. USER TEXT VALUES: Use LOWER(TRIM(text_column)) = LOWER(TRIM('value')).
+9. FOLLOW-UP QUESTIONS: Preserve relevant context.
+10. COUNT + WHO/BY WHOM: GROUP BY appropriately.
+
 SQL REQUIREMENTS:
-- If the plan says DISTINCT, you MUST use DISTINCT in the SQL
-- If a PERSON FILTER section appears above, you MUST include
-  those exact WHERE conditions in the SQL
 - Declare aliases: FROM table AS alias
 - Never use SELECT * — list columns explicitly
-- ILIKE for text searches, = TRUE/FALSE for booleans
-- For exact user-provided text/name values, prefer
-  LOWER(TRIM(text_column)) = LOWER(TRIM('value')) so case or extra spaces do not hide matches.
+- ILIKE for text searches
 - IS NULL / IS NOT NULL for nullable dates
 - LEFT JOIN preferred over INNER JOIN
-- Only use columns that exist in the schema
 - LIMIT must be included
 - For UNION ALL, cast columns to ::text
-- PostgreSQL does not support COUNT(DISTINCT ...) OVER (). If you need
-  distinct rows plus a total count, use SELECT DISTINCT in a subquery and
-  COUNT(*) OVER () in the outer query.
-- If the question asks for separate counts per table/category/person, return
-  those as separate named columns or rows with clear labels.
-- If the question asks "who gave/assigned/owns" along with a count, GROUP BY
-  the giver/assignee/owner column and include that column in SELECT.
-- For short follow-up questions, preserve relevant table/filter/status
-  constraints from RECENT CHAT CONTEXT unless the user clearly changes scope.
+- PostgreSQL does not support COUNT(DISTINCT ...) OVER ().
+- If the question asks for separate counts, return as separate named columns or rows.
+
+OUTPUT FORMAT:
+You MUST format your output exactly like this:
+<thought_process>
+1. Table(s): ...
+2. Filter(s): ...
+3. Select/Agg: ...
+</thought_process>
+<sql>
+[RAW SQL ONLY, NO SEMICOLON, NO MARKDOWN, NO BACKTICKS]
+</sql>
 
 QUESTION: {question}
 ENTITIES: {entities_json}""".strip()
 
-    user_prompt = f"Generate the SQL query for: {question}"
-    raw_sql = await _call_openai_sql(system_prompt, user_prompt)
+    user_prompt = f"Generate the query plan and SQL query for: {question}"
+    response_text = await _call_openai_sql(system_prompt, user_prompt)
+    
+    # Extract just the SQL portion
+    sql_match = re.search(r"<sql>\s*(.*?)\s*</sql>", response_text, re.DOTALL | re.IGNORECASE)
+    if sql_match:
+        raw_sql = sql_match.group(1)
+        # Log the thought process for debugging
+        thought_match = re.search(r"<thought_process>\s*(.*?)\s*</thought_process>", response_text, re.DOTALL | re.IGNORECASE)
+        if thought_match:
+            logger.info("[SQL_PLAN] %s", thought_match.group(1).replace("\n", " | "))
+    else:
+        # Fallback if the model didn't use the tags
+        raw_sql = response_text
+        if "<thought_process>" in raw_sql:
+            raw_sql = re.sub(r"<thought_process>.*?</thought_process>", "", raw_sql, flags=re.DOTALL | re.IGNORECASE).strip()
+            
     return _strip_code_fences(raw_sql)
 
 
