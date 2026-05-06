@@ -1737,25 +1737,31 @@ async def fetch_google_sheet_runtime_context(
 		_sheets_data_cache[sheet_id] = (now, profiles, hints, spreadsheet_title)
 
 	# Question-specific context is always rebuilt from cached/fresh profiles
-	row_limit = int(os.getenv("GOOGLE_SHEETS_CONTEXT_ROW_LIMIT", "200"))
-
 	lines: list[str] = [f"Google Sheets Live Data Context: {spreadsheet_title}", ""]
 	targeted_matches = _build_google_sheet_targeted_match_context(profiles, question)
+
 	if targeted_matches:
 		lines.append(targeted_matches)
 		lines.append("")
-
-	for profile in profiles:
-		lines.append(f"Sheet `{profile['title']}` | Rows: ~{profile['row_count']}")
-		lines.append(f"Description: {profile['description']}")
-		lines.append(f"Columns: {', '.join(profile['headers'])}")
-		visible_rows = profile["rows"][:row_limit]
-		lines.append(f"Full data snapshot ({len(visible_rows)} of {profile['row_count']} rows):")
-		for row in visible_rows:
-			lines.append(f"  Row {row['row_number']}: {row['values']}")
-		if profile["row_count"] > len(visible_rows):
-			lines.append(f"  Snapshot truncated: {profile['row_count'] - len(visible_rows)} additional rows are not included.")
-		lines.append("")
+		# Targeted matches found — no need to dump full rows. Just provide headers for context.
+		for profile in profiles:
+			lines.append(f"Sheet `{profile['title']}` | Rows: ~{profile['row_count']}")
+			lines.append(f"Description: {profile['description']}")
+			lines.append(f"Columns: {', '.join(profile['headers'])}\n")
+	else:
+		# No exact matches found. Fallback to a small snapshot.
+		fallback_row_limit = int(os.getenv("GOOGLE_SHEETS_FALLBACK_ROW_LIMIT", "50"))
+		for profile in profiles:
+			lines.append(f"Sheet `{profile['title']}` | Rows: ~{profile['row_count']}")
+			lines.append(f"Description: {profile['description']}")
+			lines.append(f"Columns: {', '.join(profile['headers'])}")
+			visible_rows = profile["rows"][:fallback_row_limit]
+			lines.append(f"Full data snapshot ({len(visible_rows)} of {profile['row_count']} rows):")
+			for row in visible_rows:
+				lines.append(f"  Row {row['row_number']}: {row['values']}")
+			if profile["row_count"] > len(visible_rows):
+				lines.append(f"  Snapshot truncated: {profile['row_count'] - len(visible_rows)} additional rows are not included.")
+			lines.append("")
 
 	return "\n".join(lines).strip(), hints
 

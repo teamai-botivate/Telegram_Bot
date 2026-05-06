@@ -340,31 +340,40 @@ def _asks_for_everything(question: str) -> bool:
 
 
 async def is_off_topic(text: str) -> bool:
-    system_prompt = (
-        "You are a classifier for a business database chatbot.\n"
-        "The user can ask about ANY data that might exist in their company database.\n"
-        "This includes but is not limited to:\n"
-        "- employees, users, staff, team members\n"
-        "- emails, phone numbers, addresses, passwords, credentials\n"
-        "- tasks, checklists, assignments, deadlines\n"
-        "- meetings, schedules, attendance, leaves\n"
-        "- deliveries, orders, invoices, payments\n"
-        "- departments, roles, access levels\n"
-        "- reports, counts, summaries, statistics\n"
-        "- any data lookup by name, date, status, or ID\n\n"
-        "Reply YES if the message is asking about data that could exist in a business database.\n"
-        "Reply NO only if the message is clearly personal chat, jokes, general knowledge, "
-        "weather, news, or completely unrelated to any business data.\n"
-        "Return only YES or NO."
-    )
-    try:
-        answer = await _call_openai_classifier(system_prompt, f"Message: {text}\nAnswer:")
-    except Exception as exc:
-        logger.warning("Off-topic detection failed open: %s", exc)
-        return False
-
-    # Note: YES means it IS business-related, so off-topic = starts with NO
-    return answer.strip().upper().startswith("NO")
+    """Fast local heuristic to reject obvious small talk/junk. 
+    Eliminates a 2-3s LLM round trip. If a junk message slips through, 
+    the SQL pipeline will safely fail to find data anyway.
+    """
+    text_lower = text.strip().lower()
+    
+    if len(text_lower) < 2:
+        return True
+        
+    # Common small talk (exact or near-exact match)
+    small_talk = {
+        "hi", "hello", "hey", "good morning", "good evening", "good afternoon",
+        "how are you", "how are you?", "who are you", "who are you?", "what are you",
+        "thanks", "thank you", "bye", "goodbye", "ok", "okay", "test", "testing", "ping"
+    }
+    if text_lower in small_talk:
+        return True
+        
+    # Common LLM jailbreak / out-of-bounds prefixes
+    junk_patterns = [
+        r"^tell me a joke",
+        r"^what is the weather",
+        r"^write a poem",
+        r"^write code",
+        r"^who is the president",
+        r"^how to make",
+        r"^recipe for",
+        r"^sing a song",
+        r"^ignore all previous"
+    ]
+    if any(re.search(p, text_lower) for p in junk_patterns):
+        return True
+        
+    return False
 
 
 def detect_multi_table_query(text: str) -> bool:
