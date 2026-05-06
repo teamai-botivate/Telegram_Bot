@@ -634,7 +634,7 @@ SQL REQUIREMENTS:
 - ILIKE for text searches
 - IS NULL / IS NOT NULL for nullable dates
 - LEFT JOIN preferred over INNER JOIN
-- LIMIT must be included
+- Do NOT add a LIMIT clause unless the user explicitly asks for a top-N limit.
 - For UNION ALL, cast columns to ::text
 - PostgreSQL does not support COUNT(DISTINCT ...) OVER ().
 - If the question asks for separate counts, return as separate named columns or rows.
@@ -709,8 +709,14 @@ Corrected SQL:
 
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
     total_rows = len(sql_results)
-    # Increase from 10 to 100 so the user can see more results
-    display_rows = sql_results[:100]
+    # Increase from 100 to 500 to let the user see practically all records
+    display_rows = sql_results[:500]
+
+    truncation_rule = (
+        f"- The data has been truncated. You MUST add a note at the end saying: 'Showing {len(display_rows)} out of {total_rows} records.'"
+        if total_rows > len(display_rows)
+        else "- DO NOT add any note like 'Showing X of Y records' or 'Showing all records'. Just list the data."
+    )
 
     system_prompt = f"""Format the following database query results for the user.
 You are {company_name}'s data assistant answering via WhatsApp and Telegram.
@@ -724,13 +730,14 @@ FORMATTING RULES FOR WHATSAPP/TELEGRAM:
 - Make it conversational, clear, and easy to read on a mobile phone.
 - Use emojis appropriately but sparingly to make it look professional yet friendly.
 - Present lists as clean bullet points (-) or numbered lists (1., 2., 3.).
+- PLAIN TEXT ONLY. DO NOT use Markdown formatting (no **bold**, no *italics*, no `code` blocks). 
+- Skip completely empty or blank entries (e.g., if a row only has null or empty names, do not list it as '1. .' or 'Empty').
 - DO NOT dump raw JSON keys (like "ID: 1, Employee_ID: null, Name: null"). Extract the actual human-readable meaning and present it nicely (e.g., "• John Doe"). Ignore completely null or irrelevant internal database IDs unless specifically asked.
-- If there are more than {len(display_rows)} rows total, add a note saying "Showing {len(display_rows)} out of {total_rows} records." at the end. 
-- DO NOT say "Showing {len(display_rows)} of {total_rows}." if the numbers are the same (i.e., never say "Showing 3 of 3").
+{truncation_rule}
 - Single counts should be stated conversationally: "There are 835 pending tasks."
 - Do not explain your thought process. Just provide the final formatted message."""
 
-    return await _call_openai_formatting(system_prompt, question, max_tokens=1000)
+    return await _call_openai_formatting(system_prompt, question, max_tokens=3000)
 
 
 def _validate_generated_sql(sql: str) -> str:

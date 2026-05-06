@@ -122,8 +122,8 @@ def _sanitize_select_sql(sql: str, allow_select_star: bool = False) -> str:
 		raise SecurityError("Multiple statements are not allowed.")
 
 	lowered = cleaned.lower()
-	if not lowered.startswith("select"):
-		raise SecurityError("Only SELECT statements are allowed.")
+	if not (lowered.startswith("select") or lowered.startswith("with")):
+		raise SecurityError("Only SELECT or WITH statements are allowed.")
 
 	blocked_keywords = ("insert", "update", "delete", "drop", "truncate", "alter", "create", "grant", "revoke")
 	for keyword in blocked_keywords:
