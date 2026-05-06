@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -1111,16 +1112,18 @@ async def _run_postgres_pipeline_for_credential(
     _remember_conversation_context(msg, msg.text, reply, sql=_generated_sql)
 
     if ENABLE_QUERY_LEARNING and _generated_sql is not None and query_rows:
-        try:
-            await store_query_example(
-                tenant_id=tenant.id,
-                question=msg.text,
-                sql=_generated_sql,
-                product_connection_id=None,
-                verified_by="auto",
-            )
-        except Exception as store_error:
-            logger.warning("[QUERY_LEARNING] Failed to store example for %s: %s", cred_label, store_error)
+        async def _store_bg() -> None:
+            try:
+                await store_query_example(
+                    tenant_id=tenant.id,
+                    question=msg.text,
+                    sql=_generated_sql,
+                    product_connection_id=None,
+                    verified_by="auto",
+                )
+            except Exception as store_error:
+                logger.warning("[QUERY_LEARNING] Failed to store example for %s: %s", cred_label, store_error)
+        asyncio.create_task(_store_bg())
 
     return {"status": "ok", "reply": reply, "sql": _generated_sql}
 
