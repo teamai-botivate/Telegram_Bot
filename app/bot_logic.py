@@ -1159,7 +1159,7 @@ async def _run_sheets_pipeline_for_credential(
         return {"status": "error"}
 
     try:
-        live_context, gs_hints = fetch_google_sheet_runtime_context(sheet_id, creds_json, question=msg.text)
+        live_context, gs_hints = await fetch_google_sheet_runtime_context(sheet_id, creds_json, question=msg.text)
     except Exception as e:
         logger.error("Google Sheets fetch failed for credential=%s: %s", credential.id, e)
         return {"status": "connection_error"}

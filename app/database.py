@@ -1692,17 +1692,25 @@ async def fetch_google_sheet_data(sheet_id: str, credentials_json: str) -> tuple
 	return blueprint, hints
 
 
-def fetch_google_sheet_runtime_context(
+async def fetch_google_sheet_runtime_context(
 	sheet_id: str,
 	credentials_json: str,
 	question: str | None = None,
 ) -> tuple[str, str]:
-	"""Return live Google Sheets rows for answering. This output is not stored."""
-	spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
-	profiles, hints = _collect_google_sheet_profiles(spreadsheet)
+	"""Return live Google Sheets rows for answering. This output is not stored.
+
+	gspread is synchronous and blocks the event loop, so the heavy I/O
+	(spreadsheet load + profile collection) is offloaded to a thread pool.
+	"""
+	def _blocking_fetch() -> tuple[list[dict[str, Any]], str, str]:
+		spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
+		profiles, hints = _collect_google_sheet_profiles(spreadsheet)
+		return profiles, hints, spreadsheet.title
+
+	profiles, hints, spreadsheet_title = await asyncio.to_thread(_blocking_fetch)
 	row_limit = int(os.getenv("GOOGLE_SHEETS_CONTEXT_ROW_LIMIT", "200"))
 
-	lines: list[str] = [f"Google Sheets Live Data Context: {spreadsheet.title}", ""]
+	lines: list[str] = [f"Google Sheets Live Data Context: {spreadsheet_title}", ""]
 	targeted_matches = _build_google_sheet_targeted_match_context(profiles, question)
 	if targeted_matches:
 		lines.append(targeted_matches)
@@ -1721,3 +1729,4 @@ def fetch_google_sheet_runtime_context(
 		lines.append("")
 
 	return "\n".join(lines).strip(), hints
+
