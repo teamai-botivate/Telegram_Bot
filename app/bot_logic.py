@@ -1525,7 +1525,13 @@ async def handle_message(msg: BotMessage) -> None:
             await _handle_adddb_command(msg)
             return
 
-        if await is_off_topic(msg.text):
+        # ── Run off-topic check and tenant lookup concurrently ────────────────
+        off_topic_result, tenant = await asyncio.gather(
+            is_off_topic(msg.text),
+            get_tenant_by_chat_id(msg.chat_id),
+        )
+
+        if off_topic_result:
             await send_reply(
                 msg,
                 "I can only help with your business data. Try questions like:\n\n"
@@ -1537,8 +1543,6 @@ async def handle_message(msg: BotMessage) -> None:
             return
 
         # ── Tier 1: fully onboarded tenant ───────────────────────────────────
-        tenant = await get_tenant_by_chat_id(msg.chat_id)
-
         if tenant is None:
             # ── Tier 2: registered but not yet onboarded ──────────────────
             registered_client = await find_registered_client_by_chat(
