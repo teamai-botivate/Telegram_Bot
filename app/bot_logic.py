@@ -709,30 +709,28 @@ Corrected SQL:
 
 async def format_sql_response(company_name: str, question: str, sql_results: list[dict[str, Any]]) -> str:
     total_rows = len(sql_results)
-    display_rows = sql_results[:10]
+    # Increase from 10 to 100 so the user can see more results
+    display_rows = sql_results[:100]
 
-    system_prompt = f"""Reply in English only. Plain text only — no markdown,
-no **bold**, no | tables |. Keep it short (3-8 lines max).
+    system_prompt = f"""Format the following database query results for the user.
+You are {company_name}'s data assistant answering via WhatsApp and Telegram.
+Language: ONLY English. Do not include any text in other languages.
 
-You are {company_name}'s data assistant. The user asked: "{question}"
-{total_rows} rows returned. Data (first {len(display_rows)}):
+User Question: "{question}"
+Data (first {len(display_rows)} of {total_rows} rows):
 {json.dumps(display_rows, default=str)}
 
-HOW TO RESPOND:
-- Single count → state it: "There are 835 pending tasks."
-- Multiple counts → list each: "HR: 45, IT: 23, Production: 12"
-- List of names → list them comma-separated
-- Record details → show 2-3 key fields per record, numbered
-- If total > {len(display_rows)} → add: "Showing {len(display_rows)} of {total_rows}."
+FORMATTING RULES FOR WHATSAPP/TELEGRAM:
+- Make it conversational, clear, and easy to read on a mobile phone.
+- Use emojis appropriately but sparingly to make it look professional yet friendly.
+- Present lists as clean bullet points (-) or numbered lists (1., 2., 3.).
+- DO NOT dump raw JSON keys (like "ID: 1, Employee_ID: null, Name: null"). Extract the actual human-readable meaning and present it nicely (e.g., "• John Doe"). Ignore completely null or irrelevant internal database IDs unless specifically asked.
+- If there are more than {len(display_rows)} rows total, add a note saying "Showing {len(display_rows)} out of {total_rows} records." at the end. 
+- DO NOT say "Showing {len(display_rows)} of {total_rows}." if the numbers are the same (i.e., never say "Showing 3 of 3").
+- Single counts should be stated conversationally: "There are 835 pending tasks."
+- Do not explain your thought process. Just provide the final formatted message."""
 
-AVOID:
-- Never say "Showing X of Y counts" for a single number
-- Don't repeat identical values for every row — mention once
-- Don't add unnecessary filler like "Need details? Just ask!"
-  unless it genuinely helps
-- If data has non-English words, translate them to English"""
-
-    return await _call_openai_formatting(system_prompt, question, max_tokens=500)
+    return await _call_openai_formatting(system_prompt, question, max_tokens=1000)
 
 
 def _validate_generated_sql(sql: str) -> str:
