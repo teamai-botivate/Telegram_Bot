@@ -130,9 +130,6 @@ def _sanitize_select_sql(sql: str, allow_select_star: bool = False) -> str:
 		if re.search(rf"\b{keyword}\b", lowered):
 			raise SecurityError(f"Disallowed keyword detected: {keyword.upper()}")
 
-	if not allow_select_star and re.search(r"\bselect\s+\*", lowered):
-		raise SecurityError("SELECT * is not allowed for this execution path.")
-
 	return cleaned
 
 META_SQLALCHEMY_DATABASE_URL = _convert_to_sqlalchemy_asyncpg_url(DATABASE_URL) if DATABASE_URL else ""

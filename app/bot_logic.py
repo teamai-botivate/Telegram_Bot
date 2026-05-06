@@ -763,9 +763,6 @@ def _validate_generated_sql(sql: str) -> str:
     if any(re.search(pattern, lowered) for pattern in blocked_patterns):
         raise ValueError("Generated SQL includes disallowed operations.")
 
-    if re.search(r"\bselect\s+\*", lowered):
-        raise ValueError("Generated SQL uses SELECT * which is not allowed.")
-
     return cleaned
 
 
