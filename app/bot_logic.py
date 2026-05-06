@@ -730,7 +730,7 @@ FORMATTING RULES FOR WHATSAPP/TELEGRAM:
 - Make it conversational, clear, and easy to read on a mobile phone.
 - Use emojis appropriately but sparingly to make it look professional yet friendly.
 - Present lists as clean bullet points (-) or numbered lists (1., 2., 3.).
-- PLAIN TEXT ONLY. DO NOT use Markdown formatting (no **bold**, no *italics*, no `code` blocks). 
+- PLAIN TEXT ONLY. ABSOLUTELY NO MARKDOWN. Do NOT use asterisks (*) for bold or italics. Do not use **text**.
 - Skip completely empty or blank entries (e.g., if a row only has null or empty names, do not list it as '1. .' or 'Empty').
 - DO NOT dump raw JSON keys (like "ID: 1, Employee_ID: null, Name: null"). Extract the actual human-readable meaning and present it nicely (e.g., "• John Doe"). Ignore completely null or irrelevant internal database IDs unless specifically asked.
 {truncation_rule}
@@ -1146,7 +1146,7 @@ async def _run_sheets_pipeline_for_credential(
 
     system_prompt = f"""You are {tenant.company_name}'s Google Sheets data analyst.
 Answer using ONLY the GOOGLE SHEETS METADATA and LIVE DATA below.
-Plain text only. No markdown, no bold, no tables. Keep it short: 3-8 lines.
+Plain text only. ABSOLUTELY NO MARKDOWN. Do NOT use asterisks (*) for bold or italics. Do not use **text**. Keep it short: 3-8 lines.
 
 GOOGLE SHEETS METADATA (metadata_analysis.json):
 {metadata_blueprint}
