@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import socket
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 # ── Per-tenant connection pool cache ──
 _tenant_pools: dict[str, asyncpg.Pool] = {}
 _pool_lock = asyncio.Lock()
+
+# ── Runtime schema cache (avoids 170+ introspection queries per message) ──
+RUNTIME_SCHEMA_CACHE_TTL_SECONDS = float(os.getenv("RUNTIME_SCHEMA_CACHE_TTL_SECONDS", "300"))  # 5 minutes
+_runtime_schema_cache: dict[str, tuple[float, str, str]] = {}  # {credential_id: (timestamp, schema, hints)}
 
 
 class TenantDBConnectionError(Exception):
@@ -579,11 +584,41 @@ async def explain_validate_sql_for_credential(
 async def fetch_credential_postgres_runtime_schema(
 	credential: TenantDBCredential,
 ) -> tuple[str, str]:
-	"""Runtime schema introspection for a specific credential's DB."""
+	"""Runtime schema introspection for a specific credential's DB.
+
+	Results are cached per credential for RUNTIME_SCHEMA_CACHE_TTL_SECONDS
+	(default 5 min) to avoid running 170+ introspection queries on every message.
+	The cache is invalidated when refresh_schema_blueprint() is called.
+	"""
 	if credential.db_type.lower() != "postgresql":
 		raise TenantDBConnectionError("Only PostgreSQL tenant databases are supported for PostgreSQL schema introspection.")
+
+	cache_key = str(credential.id)
+	now = time.monotonic()
+
+	cached = _runtime_schema_cache.get(cache_key)
+	if cached is not None:
+		ts, cached_schema, cached_hints = cached
+		if now - ts < RUNTIME_SCHEMA_CACHE_TTL_SECONDS:
+			logger.debug("[SCHEMA_CACHE] HIT credential=%s age=%.1fs", cache_key, now - ts)
+			return cached_schema, cached_hints
+
+	logger.info("[SCHEMA_CACHE] MISS credential=%s — running full introspection", cache_key)
 	connection_url = _decrypt_credential_value(credential.connection_url)
-	return await fetch_postgres_runtime_schema(connection_url)
+	schema, hints = await fetch_postgres_runtime_schema(connection_url)
+	_runtime_schema_cache[cache_key] = (now, schema, hints)
+	return schema, hints
+
+
+def invalidate_runtime_schema_cache(credential_id: uuid.UUID | str | None = None) -> None:
+	"""Clear cached runtime schema. Pass a credential_id to clear one entry, or None to clear all."""
+	if credential_id is not None:
+		key = str(credential_id)
+		if _runtime_schema_cache.pop(key, None) is not None:
+			logger.info("[SCHEMA_CACHE] Invalidated credential=%s", key)
+	else:
+		_runtime_schema_cache.clear()
+		logger.info("[SCHEMA_CACHE] Invalidated ALL entries")
 
 
 async def create_tenant_record(company_name: str, active_modules: list[str]) -> uuid.UUID:
@@ -1057,6 +1092,7 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		)
 
 	if db_type == "postgresql":
+		invalidate_runtime_schema_cache(credential_id)
 		blueprint, auto_hints = await fetch_postgres_schema(connection_url)
 	elif db_type == "google_sheets":
 		if not google_credentials:

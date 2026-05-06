@@ -21,8 +21,6 @@ from .database import (
     TenantDBConnectionError,
     execute_credential_query,
     execute_tenant_query,
-    explain_validate_sql,
-    explain_validate_sql_for_credential,
     fetch_credential_postgres_runtime_schema,
     fetch_tenant_postgres_runtime_schema,
     find_registered_client_by_chat,
@@ -1060,18 +1058,8 @@ async def _run_postgres_pipeline_for_credential(
             logger.info(f"[SQL_GEN] credential={credential.id} query='{msg.text}'")
             logger.info(f"[SQL_OUT] {sql_query}")
 
-            is_valid, explain_err = await explain_validate_sql_for_credential(credential, sql_query)
-            if not is_valid:
-                logger.warning(f"[EXPLAIN_FAIL] Pre-fixing SQL: {explain_err}")
-                sql_query = await fix_sql(sql_query, explain_err, blueprint)
-                sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
-                sql_query = _validate_generated_sql(sql_query)
-                sql_query = await _fix_unsupported_postgres_constructs(sql_query, blueprint)
-                logger.info(f"[SQL_FIXED_BY_EXPLAIN] {sql_query}")
-
             max_retries = 2
             attempt = 0
-            _explain_passed = is_valid
             while True:
                 try:
                     query_rows = await execute_credential_query(credential, sql_query)
@@ -1101,7 +1089,6 @@ async def _run_postgres_pipeline_for_credential(
                 f"[QUERY_QUALITY] tenant={tenant.id} credential={credential.id} "
                 f"few_shot_used={_generated_sql is not None} "
                 f"top_similarity=see:[FEW_SHOT] "
-                f"plan_to_sql_match={_explain_passed} "
                 f"rows_returned={len(query_rows)} "
                 f"retries={attempt}"
             )

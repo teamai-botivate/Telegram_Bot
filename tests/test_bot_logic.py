@@ -74,7 +74,7 @@ async def test_handle_message_off_topic_skips_db(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) -> None:
+async def test_handle_message_with_postgresql_tenant_calls_sql_pipeline(monkeypatch) -> None:
     tenant = SimpleNamespace(id=uuid.uuid4(), company_name="Demo Corp")
     credentials = SimpleNamespace(
         id=uuid.uuid4(),
@@ -87,7 +87,6 @@ async def test_handle_message_with_postgresql_tenant_calls_mistral(monkeypatch) 
     )
     send_reply_mock = AsyncMock()
 
-    monkeypatch.setattr(bot_logic, "MISTRAL_API_KEY", "test-mistral-key")
     monkeypatch.setattr(bot_logic, "send_reply", send_reply_mock)
     monkeypatch.setattr(bot_logic, "is_off_topic", AsyncMock(return_value=False))
     monkeypatch.setattr(bot_logic, "get_tenant_by_chat_id", AsyncMock(return_value=tenant))
@@ -512,6 +511,22 @@ async def test_openai_formatting_uses_max_completion_tokens(monkeypatch) -> None
     call_kwargs = fake_completions.create.await_args.kwargs
     assert call_kwargs["max_completion_tokens"] == 123
     assert "max_tokens" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_is_off_topic_uses_openai_classifier(monkeypatch) -> None:
+    classifier_mock = AsyncMock(return_value="NO")
+    monkeypatch.setattr(bot_logic, "_call_openai_classifier", classifier_mock)
+
+    assert await bot_logic.is_off_topic("Who won the cricket match?") is True
+    classifier_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_is_off_topic_allows_business_questions(monkeypatch) -> None:
+    monkeypatch.setattr(bot_logic, "_call_openai_classifier", AsyncMock(return_value="YES"))
+
+    assert await bot_logic.is_off_topic("How many pending tasks are there?") is False
 
 
 @pytest.mark.asyncio

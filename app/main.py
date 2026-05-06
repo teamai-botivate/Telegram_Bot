@@ -9,7 +9,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -67,6 +67,16 @@ async def startup() -> None:
             logger.exception("Failed to start Botivate Main DB sync scheduler.")
 
     asyncio.create_task(_start_main_db_sync())
+
+
+@app.get("/")
+async def root() -> dict[str, str]:
+	return {"status": "ok", "service": "botivate-bot"}
+
+
+@app.head("/")
+async def root_head() -> Response:
+	return Response(status_code=200)
 
 
 @app.get("/health")
