@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 SQL_GENERATION_MODEL = os.getenv("SQL_GENERATION_MODEL", "gpt-5.2")
 RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", "gpt-5.2")
-DB_ROUTER_MODEL = os.getenv("DB_ROUTER_MODEL", "gpt-4o-mini")
-OFF_TOPIC_CLASSIFIER_MODEL = os.getenv("OFF_TOPIC_CLASSIFIER_MODEL", DB_ROUTER_MODEL)
+DB_ROUTER_MODEL = os.getenv("DB_ROUTER_MODEL", "gpt-5.2")
+OFF_TOPIC_CLASSIFIER_MODEL = os.getenv("OFF_TOPIC_CLASSIFIER_MODEL", "gpt-5.2")
 ENABLE_QUERY_LEARNING = os.getenv("ENABLE_QUERY_LEARNING", "true").strip().lower() == "true"
 ACCOUNT_NOT_FOUND_MESSAGE = "Hi! I couldn't find your account. Please contact support."
 GENERIC_FAILURE_MESSAGE = "Sorry, I ran into an issue while processing your request. Please try again."
