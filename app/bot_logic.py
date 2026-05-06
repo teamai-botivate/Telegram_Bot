@@ -116,6 +116,13 @@ def _strip_code_fences(text: str) -> str:
         cleaned = re.sub(r"^```(?:sql|json)?", "", cleaned, flags=re.IGNORECASE).strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
+            
+    # Remove any hallucinated prefix text (e.g., "[RAW SQL ONLY...]")
+    # by finding the first SELECT or WITH
+    match = re.search(r"\b(SELECT|WITH)\b", cleaned, re.IGNORECASE)
+    if match:
+        cleaned = cleaned[match.start():]
+        
     return cleaned
 
 
@@ -640,7 +647,7 @@ You MUST format your output exactly like this:
 3. Select/Agg: ...
 </thought_process>
 <sql>
-[RAW SQL ONLY, NO SEMICOLON, NO MARKDOWN, NO BACKTICKS]
+YOUR_RAW_SQL_QUERY_HERE
 </sql>
 
 QUESTION: {question}
