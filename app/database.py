@@ -36,6 +36,10 @@ _pool_lock = asyncio.Lock()
 RUNTIME_SCHEMA_CACHE_TTL_SECONDS = float(os.getenv("RUNTIME_SCHEMA_CACHE_TTL_SECONDS", "300"))  # 5 minutes
 _runtime_schema_cache: dict[str, tuple[float, str, str]] = {}  # {credential_id: (timestamp, schema, hints)}
 
+# ── Google Sheets data cache (avoids repeated gspread API calls) ──
+SHEETS_CACHE_TTL_SECONDS = float(os.getenv("SHEETS_CACHE_TTL_SECONDS", "60"))  # 1 minute
+_sheets_data_cache: dict[str, tuple[float, list[dict[str, Any]], str, str]] = {}  # {sheet_id: (timestamp, profiles, hints, title)}
+
 
 class TenantDBConnectionError(Exception):
 	"""Raised when a tenant database connection cannot be established."""
@@ -1098,6 +1102,7 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		if not google_credentials:
 			raise ValueError("Google Sheets credentials are not configured.")
 		sheet_id = connection_url.replace("google_sheets://", "")
+		invalidate_sheets_data_cache(sheet_id)
 		blueprint, auto_hints = await fetch_google_sheet_data(sheet_id, google_credentials)
 	else:
 		raise ValueError("Schema refresh is supported only for PostgreSQL and Google Sheets tenants.")
@@ -1185,13 +1190,17 @@ async def retrieve_similar_examples(
     question: str,
     product_connection_id: uuid.UUID | str | None = None,
     limit: int = 5,
+    precomputed_embedding: list[float] | None = None,
 ) -> list[dict]:
     if session_factory is None:
         return []
 
-    from .embeddings import embed_text
+    if precomputed_embedding is not None:
+        embedding = precomputed_embedding
+    else:
+        from .embeddings import embed_text
+        embedding = await embed_text(question)
 
-    embedding = await embed_text(question)
     if embedding is None:
         logger.warning("retrieve_similar_examples: embedding failed, returning empty for tenant=%s.", tenant_id)
         return []
@@ -1699,15 +1708,35 @@ async def fetch_google_sheet_runtime_context(
 ) -> tuple[str, str]:
 	"""Return live Google Sheets rows for answering. This output is not stored.
 
-	gspread is synchronous and blocks the event loop, so the heavy I/O
-	(spreadsheet load + profile collection) is offloaded to a thread pool.
-	"""
-	def _blocking_fetch() -> tuple[list[dict[str, Any]], str, str]:
-		spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
-		profiles, hints = _collect_google_sheet_profiles(spreadsheet)
-		return profiles, hints, spreadsheet.title
+	The expensive gspread I/O (spreadsheet load + profile collection) is cached
+	per sheet_id for SHEETS_CACHE_TTL_SECONDS (default 60s). Question-specific
+	context (targeted matches, row formatting) is rebuilt each time.
 
-	profiles, hints, spreadsheet_title = await asyncio.to_thread(_blocking_fetch)
+	gspread is synchronous, so the fetch is offloaded to a thread pool.
+	"""
+	now = time.monotonic()
+	cached = _sheets_data_cache.get(sheet_id)
+
+	if cached is not None:
+		ts, cached_profiles, cached_hints, cached_title = cached
+		if now - ts < SHEETS_CACHE_TTL_SECONDS:
+			logger.debug("[SHEETS_CACHE] HIT sheet=%s age=%.1fs", sheet_id, now - ts)
+			profiles, hints, spreadsheet_title = cached_profiles, cached_hints, cached_title
+		else:
+			cached = None  # expired
+
+	if cached is None:
+		logger.info("[SHEETS_CACHE] MISS sheet=%s — fetching from Google API", sheet_id)
+
+		def _blocking_fetch() -> tuple[list[dict[str, Any]], str, str]:
+			spreadsheet = _load_google_spreadsheet(sheet_id, credentials_json)
+			profs, hnts = _collect_google_sheet_profiles(spreadsheet)
+			return profs, hnts, spreadsheet.title
+
+		profiles, hints, spreadsheet_title = await asyncio.to_thread(_blocking_fetch)
+		_sheets_data_cache[sheet_id] = (now, profiles, hints, spreadsheet_title)
+
+	# Question-specific context is always rebuilt from cached/fresh profiles
 	row_limit = int(os.getenv("GOOGLE_SHEETS_CONTEXT_ROW_LIMIT", "200"))
 
 	lines: list[str] = [f"Google Sheets Live Data Context: {spreadsheet_title}", ""]
@@ -1729,4 +1758,14 @@ async def fetch_google_sheet_runtime_context(
 		lines.append("")
 
 	return "\n".join(lines).strip(), hints
+
+
+def invalidate_sheets_data_cache(sheet_id: str | None = None) -> None:
+	"""Clear cached Google Sheets data. Pass a sheet_id to clear one entry, or None to clear all."""
+	if sheet_id is not None:
+		if _sheets_data_cache.pop(sheet_id, None) is not None:
+			logger.info("[SHEETS_CACHE] Invalidated sheet=%s", sheet_id)
+	else:
+		_sheets_data_cache.clear()
+		logger.info("[SHEETS_CACHE] Invalidated ALL entries")
 

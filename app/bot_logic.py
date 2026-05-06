@@ -614,6 +614,7 @@ async def generate_sql_query(
     tenant_id: Any = None,
     product_connection_id: Any = None,
     conversation_context_block: str = "",
+    precomputed_embedding: list[float] | None = None,
 ) -> str:
     """Two-step Chain-of-Thought SQL generation.
 
@@ -627,7 +628,8 @@ async def generate_sql_query(
     if tenant_id is not None:
         try:
             examples = await retrieve_similar_examples(
-                tenant_id, question, product_connection_id=product_connection_id, limit=5
+                tenant_id, question, product_connection_id=product_connection_id, limit=5,
+                precomputed_embedding=precomputed_embedding,
             )
         except Exception as retrieval_error:
             logger.warning("[FEW_SHOT] retrieval failed: %s", retrieval_error)
@@ -996,8 +998,21 @@ async def _run_postgres_pipeline_for_credential(
         or str(getattr(credential, "id", "credential"))
     )
 
+    # ── Run schema fetch and question embedding concurrently ──
+    from .embeddings import embed_text
+
+    async def _safe_embed() -> list[float] | None:
+        try:
+            return await embed_text(msg.text)
+        except Exception as exc:
+            logger.warning("[EMBED_PRE] failed: %s", exc)
+            return None
+
     try:
-        runtime_schema, runtime_hints = await fetch_credential_postgres_runtime_schema(credential)
+        (runtime_schema, runtime_hints), question_embedding = await asyncio.gather(
+            fetch_credential_postgres_runtime_schema(credential),
+            _safe_embed(),
+        )
     except TenantDBConnectionError as schema_error:
         logger.error("[SCHEMA_ERR] credential=%s error='%s'", credential.id, schema_error)
         return {"status": "connection_error"}
@@ -1052,6 +1067,7 @@ async def _run_postgres_pipeline_for_credential(
                 tenant_id=tenant.id,
                 product_connection_id=None,
                 conversation_context_block=conversation_context_block,
+                precomputed_embedding=question_embedding,
             )
             sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
             sql_query = _validate_generated_sql(sql_query)
