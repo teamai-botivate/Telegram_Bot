@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.models import Base, RegisteredClient, Tenant, TenantDBCredential
 
 from .core import *
+from .core import _sheets_data_cache
 def _infer_column_type(values: list[str]) -> str:
 	"""Infer column type from non-empty cell values."""
 	import re as _re

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.models import Base, RegisteredClient, Tenant, TenantDBCredential
 
 from .core import *
+from .core import _tenant_pools, _pool_lock
 from .security import _decrypt_credential_value
 from .crud import get_tenant_credentials, _touch_last_connected
 def _convert_to_asyncpg_url(database_url: str) -> str:

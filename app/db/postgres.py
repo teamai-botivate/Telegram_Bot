@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.models import Base, RegisteredClient, Tenant, TenantDBCredential
 
 from .core import *
+from .core import _runtime_schema_cache
 from .connection import _resolve_tenant_dsn, _get_pool_for_tenant, _get_pool_for_credential, _evict_tenant_pool, _convert_to_asyncpg_url, _quote_ident, _describe_connection_exception
 from .security import _decrypt_credential_value, _sanitize_select_sql
 from .crud import get_tenant_credentials
