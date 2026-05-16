@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import database
+from app.db import connection as db_connection
+from app.db import postgres as db_postgres
 
 
 def test_describe_connection_exception_timeout() -> None:
@@ -24,7 +26,7 @@ def test_describe_connection_exception_empty_message_falls_back_to_type_name() -
 
 @pytest.mark.asyncio
 async def test_fetch_postgres_schema_timeout_has_actionable_error(monkeypatch) -> None:
-    monkeypatch.setattr(database.asyncpg, "connect", AsyncMock(side_effect=TimeoutError()))
+    monkeypatch.setattr(db_connection.asyncpg, "connect", AsyncMock(side_effect=TimeoutError()))
 
     with pytest.raises(ValueError) as exc_info:
         await database.fetch_postgres_schema("postgresql://user:pass@db.example.com:5432/postgres")
@@ -49,10 +51,10 @@ async def test_open_fresh_connection_timeout_has_actionable_error(monkeypatch) -
         ssl_required=True,
         id="cred-id",
     )
-    monkeypatch.setattr(database, "get_tenant_credentials", AsyncMock(return_value=credential))
-    monkeypatch.setattr(database, "_decrypt_credential_value", lambda _: "postgresql://u:p@db.example.com:5432/postgres")
-    monkeypatch.setattr(database, "TENANT_DB_CONNECT_RETRIES", 0)
-    monkeypatch.setattr(database.asyncpg, "connect", AsyncMock(side_effect=TimeoutError()))
+    monkeypatch.setattr(db_connection, "get_tenant_credentials", AsyncMock(return_value=credential))
+    monkeypatch.setattr(db_connection, "_decrypt_credential_value", lambda _: "postgresql://u:p@db.example.com:5432/postgres")
+    monkeypatch.setattr(db_connection, "TENANT_DB_CONNECT_RETRIES", 0)
+    monkeypatch.setattr(db_postgres.asyncpg, "connect", AsyncMock(side_effect=TimeoutError()))
 
     with pytest.raises(database.TenantDBConnectionError) as exc_info:
         await database._open_fresh_connection("tenant-id")
@@ -127,7 +129,7 @@ async def test_execute_tenant_query_executes_query_via_pool(monkeypatch) -> None
         async def __aexit__(self, *args):
             pass
 
-    monkeypatch.setattr(database, "_get_pool_for_tenant", AsyncMock(return_value=FakePool()))
+    monkeypatch.setattr(db_postgres, "_get_pool_for_tenant", AsyncMock(return_value=FakePool()))
 
     rows = await database.execute_tenant_query("tenant-id", "SELECT id, name FROM users LIMIT 10")
 
@@ -154,7 +156,7 @@ async def test_execute_tenant_query_raises_query_error_when_query_fails(monkeypa
         async def __aexit__(self, *args):
             pass
 
-    monkeypatch.setattr(database, "_get_pool_for_tenant", AsyncMock(return_value=FakePool()))
+    monkeypatch.setattr(db_postgres, "_get_pool_for_tenant", AsyncMock(return_value=FakePool()))
 
     with pytest.raises(database.QueryExecutionError) as exc_info:
         await database.execute_tenant_query("tenant-id", "SELECT id name FROM users")

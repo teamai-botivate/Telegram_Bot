@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,14 +15,74 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .admin import router as admin_router, sync_router as admin_sync_router
-from .database import create_tables
+from .database import create_tables, _tenant_pools
 from .routers.onboarding import router as onboarding_router
 from .webhook import router as webhook_router
 
 logger = logging.getLogger(__name__)
 STARTUP_DB_INIT_TIMEOUT_SECONDS = float(os.getenv("STARTUP_DB_INIT_TIMEOUT_SECONDS", "15"))
 
-app = FastAPI(title="botivate-bot")
+
+# ── Lifespan ─────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──────────────────────────────────────────────────────────
+    # Load learned intent rules and summary patterns from disk
+    from .services.runtime_memory import load_memory
+    load_memory()
+
+    async def _initialize_db_metadata() -> None:
+        timeout_seconds = max(1.0, STARTUP_DB_INIT_TIMEOUT_SECONDS)
+        try:
+            await asyncio.wait_for(create_tables(), timeout=timeout_seconds)
+            logger.info("Database table check completed during startup.")
+        except TimeoutError:
+            logger.warning(
+                "Database table check timed out after %.1fs; continuing startup to serve health checks.",
+                timeout_seconds,
+            )
+        except Exception:
+            logger.exception("Failed to create database tables on startup.")
+
+    # Do not block ASGI startup on database availability;
+    # Render health checks should pass quickly.
+    asyncio.create_task(_initialize_db_metadata())
+
+    async def _start_main_db_sync() -> None:
+        try:
+            from .sync.main_db_sync import start_sync_scheduler
+            await start_sync_scheduler()
+        except Exception:
+            logger.exception("Failed to start Botivate Main DB sync scheduler.")
+
+    asyncio.create_task(_start_main_db_sync())
+
+    yield
+
+    # ── Shutdown ─────────────────────────────────────────────────────────
+    from .sync.main_db_sync import stop_sync_scheduler
+
+    try:
+        await stop_sync_scheduler()
+    except Exception:
+        logger.exception("Error stopping Botivate Main DB sync scheduler.")
+
+    for tid, pool in list(_tenant_pools.items()):
+        try:
+            await asyncio.wait_for(pool.close(), timeout=5.0)
+            logger.info("Closed tenant pool for %s", tid)
+        except TimeoutError:
+            logger.warning("Pool close timed out for %s, terminating", tid)
+            pool.terminate()
+        except Exception:
+            logger.exception("Error closing tenant pool %s", tid)
+    _tenant_pools.clear()
+
+
+# ── App ──────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="botivate-bot", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,66 +102,16 @@ if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    async def _initialize_db_metadata() -> None:
-        timeout_seconds = max(1.0, STARTUP_DB_INIT_TIMEOUT_SECONDS)
-        try:
-            await asyncio.wait_for(create_tables(), timeout=timeout_seconds)
-            logger.info("Database table check completed during startup.")
-        except TimeoutError:
-            logger.warning(
-                "Database table check timed out after %.1fs; continuing startup to serve health checks.",
-                timeout_seconds,
-            )
-        except Exception:
-            logger.exception("Failed to create database tables on startup.")
-
-    # Do not block ASGI startup on database availability; Render health checks should pass quickly.
-    asyncio.create_task(_initialize_db_metadata())
-
-    async def _start_main_db_sync() -> None:
-        try:
-            from .sync.main_db_sync import start_sync_scheduler
-            await start_sync_scheduler()
-        except Exception:
-            logger.exception("Failed to start Botivate Main DB sync scheduler.")
-
-    asyncio.create_task(_start_main_db_sync())
-
-
 @app.get("/")
 async def root() -> dict[str, str]:
-	return {"status": "ok", "service": "botivate-bot"}
+    return {"status": "ok", "service": "botivate-bot"}
 
 
 @app.head("/")
 async def root_head() -> Response:
-	return Response(status_code=200)
+    return Response(status_code=200)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-	return {"status": "ok"}
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-	from .database import _tenant_pools
-	from .sync.main_db_sync import stop_sync_scheduler
-
-	try:
-		await stop_sync_scheduler()
-	except Exception:
-		logger.exception("Error stopping Botivate Main DB sync scheduler.")
-
-	for tid, pool in list(_tenant_pools.items()):
-		try:
-			await asyncio.wait_for(pool.close(), timeout=5.0)
-			logger.info("Closed tenant pool for %s", tid)
-		except TimeoutError:
-			logger.warning("Pool close timed out for %s, terminating", tid)
-			pool.terminate()
-		except Exception:
-			logger.exception("Error closing tenant pool %s", tid)
-	_tenant_pools.clear()
+    return {"status": "ok"}
