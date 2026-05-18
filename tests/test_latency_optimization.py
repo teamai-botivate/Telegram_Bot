@@ -119,10 +119,16 @@ class TestIntentDetection:
         assert await intent.detect_intent("x") == "off_topic"
 
     @pytest.mark.asyncio
-    async def test_business_signals_bypass_llm(self):
-        """Strong data signals should not trigger the LLM at all."""
-        result = await intent.detect_intent("what is the total revenue this quarter?")
-        assert result == "data_query"
+    async def test_person_lookup_is_data_query(self):
+        """'Who is [name]' must never be classified as off-topic."""
+        assert await intent.detect_intent("who is passary?") == "data_query"
+        assert await intent.detect_intent("who is kavit passary?") == "data_query"
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_query_defaults_to_data(self):
+        """Anything not clearly off-topic should default to data_query."""
+        assert await intent.detect_intent("what is the total revenue this quarter?") == "data_query"
+        assert await intent.detect_intent("xyz random question about my business") == "data_query"
 
 
 # ── Smart Format Tests ───────────────────────────────────────────────────────

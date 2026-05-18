@@ -1,18 +1,21 @@
-"""Smart intent detection: hardcoded rules → learned rules → fast LLM.
+"""Smart intent detection: hardcoded off-topic rules → learned rules → default to data_query.
 
-Eliminates unnecessary main-model LLM calls by catching common intents
-with rules before falling back to the fast model.
+Philosophy: This is a business data bot. ASSUME the user wants data unless the
+message is clearly off-topic (greeting, jailbreak, small talk). If an ambiguous
+query slips through as data_query, the SQL pipeline will simply return no results
+— which is a safe, graceful outcome. False negatives (blocking real queries) are
+far worse than false positives (trying and failing).
 """
 from __future__ import annotations
 
 import re
 
 from .core import logger
-from .llm import _call_fast_llm
 from .runtime_memory import find_learned_intent, learn_intent_rule
 
 
-# ── Hardcoded Intent Rules ───────────────────────────────────────────────────
+# ── Off-topic patterns (the ONLY hardcoded rules) ───────────────────────────
+# These are things that are NEVER business data questions.
 
 _GREETING_PATTERNS = {
     "hi", "hello", "hey", "good morning", "good evening", "good afternoon",
@@ -39,39 +42,15 @@ _JAILBREAK_PATTERNS = [
     r"^what is the capital",
 ]
 
-_DATA_QUERY_SIGNALS = [
-    r"\bhow many\b",
-    r"\bcount\b",
-    r"\bshow\b",
-    r"\blist\b",
-    r"\bfetch\b",
-    r"\bget\b",
-    r"\bfind\b",
-    r"\bwhat is\b.*\b(status|email|phone|name|salary|date|amount|total)\b",
-    r"\bwho\b.*\b(has|have|assigned|pending|completed|manager)\b",
-    r"\btotal\b",
-    r"\baverage\b",
-    r"\bsum\b",
-    r"\bmaximum\b|\bminimum\b|\bmax\b|\bmin\b",
-    r"\bpending\b",
-    r"\bcompleted\b",
-    r"\bassigned\b",
-    r"\boverdue\b",
-    r"\bpast due\b",
-    r"\bbetween\b.*\band\b",
-    r"\blast\s+(?:\d+\s+)?(?:days?|weeks?|months?|years?)\b",
-    r"\bthis\s+(?:week|month|year|quarter)\b",
-]
-
 
 # ── Intent Classification ────────────────────────────────────────────────────
 
 async def detect_intent(text: str) -> str:
-    """Detect intent using: hardcoded rules → learned rules → fast LLM.
+    """Detect intent using: off-topic rules → learned rules → default data_query.
 
     Returns one of:
-      "off_topic"   — greetings, jailbreaks, non-business questions
-      "data_query"  — questions about business data
+      "off_topic"   — greetings, jailbreaks, obvious non-business messages
+      "data_query"  — anything else (default — let the SQL pipeline decide)
       "command"     — bot commands (/start, /help, /adddb)
     """
     text_lower = text.strip().lower()
@@ -82,7 +61,7 @@ async def detect_intent(text: str) -> str:
     if text_lower.startswith("/start ") or text_lower.startswith("start-"):
         return "command"
 
-    # ── Layer 1: Hardcoded rules (instant, zero cost) ────────────────────
+    # ── Layer 1: Obviously off-topic (instant, zero cost) ────────────────
     if len(text_lower) < 2:
         return "off_topic"
 
@@ -92,41 +71,14 @@ async def detect_intent(text: str) -> str:
     if any(re.search(p, text_lower) for p in _JAILBREAK_PATTERNS):
         return "off_topic"
 
-    # Strong data query signals → skip LLM entirely
-    if any(re.search(p, text_lower) for p in _DATA_QUERY_SIGNALS):
-        return "data_query"
-
     # ── Layer 2: Learned rules from past LLM responses ───────────────────
     learned = find_learned_intent(text_lower)
     if learned is not None:
         logger.info("[INTENT] Matched learned rule: %s → %s", text_lower[:50], learned)
         return learned
 
-    # ── Layer 3: Fast LLM fallback (only when rules don't match) ─────────
-    try:
-        llm_intent = await _classify_with_fast_llm(text)
-        # Auto-learn this result for future queries
-        learn_intent_rule(text, llm_intent)
-        logger.info("[INTENT] LLM classified and learned: %s → %s", text[:50], llm_intent)
-        return llm_intent
-    except Exception as exc:
-        logger.warning("[INTENT] Fast LLM failed, defaulting to data_query: %s", exc)
-        return "data_query"
-
-
-async def _classify_with_fast_llm(text: str) -> str:
-    """Use the fast/cheap model for intent classification."""
-    system_prompt = (
-        "You are a message classifier for a business data assistant bot. "
-        "The bot can ONLY answer questions about business data (databases, spreadsheets, records, employees, tasks, etc.).\n\n"
-        "Classify the user message into exactly one of:\n"
-        "- DATA_QUERY: Questions about business data, records, counts, lists, lookups, reports\n"
-        "- OFF_TOPIC: Greetings, small talk, jokes, non-business questions, jailbreaks\n\n"
-        "Reply with ONLY the classification label. Nothing else."
-    )
-    result = await _call_fast_llm(system_prompt, text, max_tokens=10)
-    result_upper = result.strip().upper()
-
-    if "DATA" in result_upper:
-        return "data_query"
-    return "off_topic"
+    # ── Layer 3: Default to data_query ───────────────────────────────────
+    # In a business data bot, assume the user wants data. If it's truly
+    # off-topic, the SQL pipeline will return no results gracefully.
+    logger.info("[INTENT] No off-topic match — defaulting to data_query: %s", text_lower[:50])
+    return "data_query"
