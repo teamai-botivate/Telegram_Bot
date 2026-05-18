@@ -55,7 +55,7 @@ async def generate_sql_query(
             examples = []
 
     top_sim = examples[0]["similarity"] if examples else 0
-    logger.info(f"[FEW_SHOT] retrieved={len(examples)} top_sim={top_sim:.3f}")
+    logger.debug(f"[FEW_SHOT] retrieved={len(examples)} top_sim={top_sim:.3f}")
 
     if examples:
         few_shot_block = "EXAMPLES of past successful queries on this database (for reference, not copying):\n"
@@ -140,7 +140,7 @@ ENTITIES: {entities_json}""".strip()
         # Log the thought process for debugging
         thought_match = re.search(r"<thought_process>\s*(.*?)\s*</thought_process>", response_text, re.DOTALL | re.IGNORECASE)
         if thought_match:
-            logger.info("[SQL_PLAN] %s", thought_match.group(1).replace("\n", " | "))
+            logger.debug("[SQL_PLAN] %s", thought_match.group(1).replace("\n", " | "))
     else:
         # Fallback if the model didn't use the tags
         raw_sql = response_text

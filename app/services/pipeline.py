@@ -107,10 +107,6 @@ async def route_question_to_database(
         reason = str(parsed.get("reason", ""))[:300]
     except Exception as exc:
         logger.warning("[ROUTE] LLM router failed; falling back to all DBs: %s", exc)
-        logger.info(
-            "[ROUTE] tenant=%s dbs_available=%d dbs_chosen=%s reason='router_error'",
-            tenant_id, len(credentials), [s["product_slug"] for s in summaries],
-        )
         return credentials
 
     matched: list[Any] = []
@@ -126,13 +122,9 @@ async def route_question_to_database(
             "[ROUTE] LLM returned no valid slugs (got %s); falling back to all DBs.",
             chosen_slugs,
         )
-        logger.info(
-            "[ROUTE] tenant=%s dbs_available=%d dbs_chosen=%s reason='no_valid_slugs'",
-            tenant_id, len(credentials), [s["product_slug"] for s in summaries],
-        )
         return credentials
 
-    logger.info(
+    logger.debug(
         "[ROUTE] tenant=%s dbs_available=%d dbs_chosen=%s reason=%r",
         tenant_id, len(credentials),
         [getattr(c, "product_slug", None) or str(getattr(c, "id", "?")) for c in matched],
@@ -230,7 +222,6 @@ async def _run_postgres_pipeline_for_credential(
     try:
         if detect_multi_table_query(msg.text):
             table_names = _extract_table_names_from_blueprint(blueprint)
-            logger.info(f"[SQL_GEN] credential={credential.id} query='{msg.text}'")
             if not table_names:
                 logger.info("[SQL_PIPELINE] No tables in blueprint for credential=%s", credential.id)
                 return {"status": "empty"}
@@ -268,7 +259,6 @@ async def _run_postgres_pipeline_for_credential(
             sql_query = _maybe_expand_count_query_across_tables(sql_query, blueprint, msg.text)
             sql_query = _validate_generated_sql(sql_query)
             sql_query = await _fix_unsupported_postgres_constructs(sql_query, blueprint)
-            logger.info(f"[SQL_GEN] credential={credential.id} query='{msg.text}'")
             logger.info(f"[SQL_OUT] {sql_query}")
 
             max_retries = 2
@@ -297,14 +287,6 @@ async def _run_postgres_pipeline_for_credential(
                     sql_query = _validate_generated_sql(sql_query)
                     sql_query = await _fix_unsupported_postgres_constructs(sql_query, blueprint)
                     logger.info(f"[SQL_OUT] {sql_query}")
-
-            logger.info(
-                f"[QUERY_QUALITY] tenant={tenant.id} credential={credential.id} "
-                f"few_shot_used={_generated_sql is not None} "
-                f"top_similarity=see:[FEW_SHOT] "
-                f"rows_returned={len(query_rows)} "
-                f"retries={attempt}"
-            )
     except Exception:
         logger.exception("[SQL_PIPELINE] Unhandled error for credential %s", credential.id)
         return {"status": "error"}

@@ -84,7 +84,7 @@ async def smart_format_response(
     shape = classify_result_shape(sql_results)
     use_template = should_use_template(shape)
 
-    logger.info("[FORMAT] shape=%s use_template=%s rows=%d", shape, use_template, len(sql_results))
+    logger.debug("[FORMAT] shape=%s use_template=%s rows=%d", shape, use_template, len(sql_results))
 
     # ── Template path (instant, no LLM cost) ─────────────────────────────
     if use_template:

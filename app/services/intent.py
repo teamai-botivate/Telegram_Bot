@@ -74,11 +74,11 @@ async def detect_intent(text: str) -> str:
     # ── Layer 2: Learned rules from past LLM responses ───────────────────
     learned = find_learned_intent(text_lower)
     if learned is not None:
-        logger.info("[INTENT] Matched learned rule: %s → %s", text_lower[:50], learned)
+        logger.debug("[INTENT] Matched learned rule: %s → %s", text_lower[:50], learned)
         return learned
 
     # ── Layer 3: Default to data_query ───────────────────────────────────
     # In a business data bot, assume the user wants data. If it's truly
     # off-topic, the SQL pipeline will return no results gracefully.
-    logger.info("[INTENT] No off-topic match — defaulting to data_query: %s", text_lower[:50])
+    logger.debug("[INTENT] No off-topic match — defaulting to data_query: %s", text_lower[:50])
     return "data_query"

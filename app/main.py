@@ -10,6 +10,22 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
+
+class _HealthAccessLogFilter(logging.Filter):
+    """Drop uvicorn access-log lines for /health and HEAD / probes (Render heartbeat)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "/health" in message or 'HEAD / HTTP' in message:
+            return False
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_HealthAccessLogFilter())
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

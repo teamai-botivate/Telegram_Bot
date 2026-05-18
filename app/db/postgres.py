@@ -178,7 +178,7 @@ async def fetch_credential_postgres_runtime_schema(
 			logger.debug("[SCHEMA_CACHE] HIT credential=%s age=%.1fs", cache_key, now - ts)
 			return cached_schema, cached_hints
 
-	logger.info("[SCHEMA_CACHE] MISS credential=%s — running full introspection", cache_key)
+	logger.debug("[SCHEMA_CACHE] MISS credential=%s — running full introspection", cache_key)
 	connection_url = _decrypt_credential_value(credential.connection_url)
 	schema, hints = await fetch_postgres_runtime_schema(connection_url)
 	_runtime_schema_cache[cache_key] = (now, schema, hints)
