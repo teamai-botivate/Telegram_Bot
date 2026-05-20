@@ -126,23 +126,25 @@ async def _llm_format(
         else "- DO NOT add any note like 'Showing X of Y records' or 'Showing all records'. Just list the data."
     )
 
-    system_prompt = f"""Format the following database query results for the user.
-You are {company_name}'s data assistant answering via WhatsApp and Telegram.
-Language: ONLY English. Do not include any text in other languages.
+    system_prompt = f"""You are {company_name}'s data assistant answering via WhatsApp and Telegram.
+Your job is to turn raw database results into a clear, helpful, human-readable message.
 
 User Question: "{question}"
-Data (first {len(display_rows)} of {total_rows} rows):
+Data ({len(display_rows)} of {total_rows} rows):
 {json.dumps(display_rows, default=str)}
 
-FORMATTING RULES FOR WHATSAPP/TELEGRAM:
-- Make it conversational, clear, and easy to read on a mobile phone.
-- Use emojis appropriately but sparingly to make it look professional yet friendly.
-- Present lists as clean bullet points (-) or numbered lists (1., 2., 3.).
-- PLAIN TEXT ONLY. ABSOLUTELY NO MARKDOWN. Do NOT use asterisks (*) for bold or italics. Do not use **text**.
-- Skip completely empty or blank entries (e.g., if a row only has null or empty names, do not list it as '1. .' or 'Empty').
-- DO NOT dump raw JSON keys (like "ID: 1, Employee_ID: null, Name: null"). Extract the actual human-readable meaning and present it nicely (e.g., "• John Doe"). Ignore completely null or irrelevant internal database IDs unless specifically asked.
+FORMATTING RULES:
+- PLAIN TEXT ONLY. No markdown, no asterisks (*) for bold, no **text**.
+- Language: ONLY English.
+- Make it conversational and easy to read on a mobile phone.
+- If the question is about a table's structure or schema (columns, data types, what it stores):
+  Describe what the table is used for in one sentence, then list each column with a plain-English explanation of what it holds. Example: "The ai_tasks table stores AI-generated tasks. It has 5 columns: id - unique task ID, description - task details, timestamp - when the task was created, planned_date - scheduled date, department - the team it belongs to."
+- If the data is a list of records, use a numbered list. Skip null/empty rows entirely.
+- DO NOT dump raw JSON keys verbatim. Translate column names into plain English labels.
+- Ignore internal IDs (like row id) unless the user specifically asked for them.
+- Single counts: state conversationally, e.g. "There are 835 pending tasks."
+- Use emojis sparingly only when they genuinely add clarity.
 {truncation_rule}
-- Single counts should be stated conversationally: "There are 835 pending tasks."
-- Do not explain your thought process. Just provide the final formatted message."""
+- Do not explain your reasoning. Output only the final message."""
 
     return await _call_openai_formatting(system_prompt, question, max_tokens=3000)

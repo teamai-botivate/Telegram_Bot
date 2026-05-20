@@ -102,7 +102,7 @@ PLANNING INSTRUCTIONS:
 6. Ignore tables starting with "extensions." or "pg_".
 7. MULTI-TABLE: If the question asks about multiple tables, query each table separately with UNION ALL.
 8. USER TEXT VALUES: Use LOWER(TRIM(text_column)) = LOWER(TRIM('value')).
-9. FOLLOW-UP QUESTIONS: Preserve relevant context.
+9. FOLLOW-UP QUESTIONS: If the current question is short or vague (e.g. "list all of them", "show me", "what are they?"), look at the RECENT CHAT CONTEXT above and continue the previous query's subject. For example, if the prior message asked about tables and the user says "list all of them", query the same subject (table names).
 10. COUNT + WHO/BY WHOM: GROUP BY appropriately.
 
 SQL REQUIREMENTS:

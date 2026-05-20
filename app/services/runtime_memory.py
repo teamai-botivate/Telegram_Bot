@@ -194,7 +194,9 @@ def should_use_template(shape: str) -> bool:
     handled by templates before, or for trivially simple shapes.
     """
     # Always use templates for trivial shapes
-    if shape in ("single_count", "empty", "single_row", "short_list"):
+    # single_row is intentionally excluded: it often contains multi-column structured
+    # data (e.g. table metadata) that needs LLM narrative rather than a raw bullet dump.
+    if shape in ("single_count", "empty", "short_list"):
         return True
 
     # Check if templates have historically worked for this shape
