@@ -80,9 +80,12 @@ async def _fetch_main_db_rows() -> list[dict[str, Any]]:
         raise RuntimeError("BOTIVATE_MAIN_DB_URL is not configured.")
 
     # Read-only: we open a connection, run a SELECT, close it. Never write.
+    # statement_cache_size=0 is required for Supabase's transaction pooler
+    # (port 6543), which does not support server-side prepared statements.
     connection = await asyncpg.connect(
         BOTIVATE_MAIN_DB_URL,
         timeout=BOTIVATE_MAIN_DB_CONNECT_TIMEOUT_SECONDS,
+        statement_cache_size=0,
     )
     try:
         rows = await connection.fetch(BOTIVATE_MAIN_DB_QUERY)

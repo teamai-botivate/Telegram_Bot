@@ -491,15 +491,17 @@ async def _handle_unboarded_client(msg: BotMessage, registered_client: Any) -> N
 
         if not connected_slugs:
             reply = (
-                f"Welcome to Botivate, {registered_client.contact_name} "
-                f"from {registered_client.company_name}! "
-                f"To connect your database, please use this link "
-                f"(expires in 30 minutes):\n{form_url}"
+                f"Hi {registered_client.contact_name}! 👋\n\n"
+                f"Your {registered_client.company_name} account is registered with Botivate, "
+                f"but your database isn't connected yet — so I can't answer questions about your data yet.\n\n"
+                f"Please connect your database using this link (expires in 30 minutes):\n{form_url}\n\n"
+                f"Once connected, just message me again and I'll be ready to help."
             )
         else:
             reply = (
-                f"You still need to connect your {first_product} database. "
-                f"Use this link:\n{form_url}"
+                f"Hi {registered_client.contact_name}! 👋\n\n"
+                f"You still need to connect your {first_product} database before I can answer "
+                f"questions about it. Use this link (expires in 30 minutes):\n{form_url}"
             )
 
         logger.info(
@@ -691,9 +693,29 @@ async def handle_message(msg: BotMessage) -> None:
         if (msg.platform == Platform.TELEGRAM and text_normalized == "/start") or (
             msg.platform == Platform.WHATSAPP and text_normalized == "start"
         ):
-            # Build a contextual welcome with available data
-            welcome = await _build_welcome_message(msg.chat_id)
-            await send_reply(msg, welcome)
+            # First check if they're already a fully onboarded tenant.
+            tenant = await get_tenant_by_chat_id(msg.chat_id)
+            if tenant is not None:
+                welcome = await _build_welcome_message(msg.chat_id)
+                await send_reply(msg, welcome)
+                return
+
+            # Not a tenant — are they at least a registered client?
+            registered_client = await find_registered_client_by_chat(
+                msg.platform.value, msg.chat_id
+            )
+            if registered_client is not None:
+                # Registered but not yet onboarded → issue a fresh onboarding link.
+                await _handle_unboarded_client(msg, registered_client)
+                return
+
+            # Truly unknown contact.
+            await send_reply(
+                msg,
+                "Hi! I'm Botivate Bot.\n\n"
+                "I couldn't find your account yet. "
+                "Please contact the Botivate team to get registered.",
+            )
             return
 
         if text_normalized in ("help", "/help"):
@@ -721,13 +743,12 @@ async def handle_message(msg: BotMessage) -> None:
             get_tenant_by_chat_id(msg.chat_id),
         )
 
-        if intent_result == "off_topic":
-            await send_reply(msg, pick_off_topic_reply(msg.text))
-            return
-
         # ── Tier 1: fully onboarded tenant ───────────────────────────────────
         if tenant is None:
             # ── Tier 2: registered but not yet onboarded ──────────────────
+            # Important: this MUST run before the off-topic short-circuit so a
+            # registered user typing "hey" gets the connect-DB link rather than
+            # a generic capabilities message.
             registered_client = await find_registered_client_by_chat(
                 msg.platform.value, msg.chat_id
             )
@@ -737,11 +758,22 @@ async def handle_message(msg: BotMessage) -> None:
                 return
 
             # ── Tier 3: not registered at all ─────────────────────────────
+            # Now off-topic detection makes sense — show capabilities or a
+            # friendly greeting reply.
+            if intent_result == "off_topic":
+                await send_reply(msg, pick_off_topic_reply(msg.text))
+                return
+
             await send_reply(
                 msg,
                 "Hi! I couldn't find your account. "
                 "Please contact the Botivate team to get registered.",
             )
+            return
+
+        # ── Tenant exists. Off-topic messages get a friendly reply. ────────
+        if intent_result == "off_topic":
+            await send_reply(msg, pick_off_topic_reply(msg.text))
             return
 
         # ── Pick which DB(s) to query ───────────────────────────────────────
