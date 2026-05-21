@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from collections import OrderedDict
 from typing import Any
 
 from dotenv import load_dotenv
@@ -16,11 +17,39 @@ WEBHOOK_VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "")
 
 router = APIRouter(tags=["webhook"])
 
+# ── Webhook deduplication ────────────────────────────────────────────────────
+# Telegram occasionally redelivers the same update_id (e.g. during Render free-tier
+# wake-ups or rolling deploys). Track recent update_ids in memory and drop dupes.
+# WhatsApp messages have a unique `id` field we use for the same purpose.
+_RECENT_UPDATE_IDS: "OrderedDict[str, None]" = OrderedDict()
+_RECENT_UPDATE_IDS_MAX = 1000
+
+
+def _is_duplicate_update(key: str) -> bool:
+	"""Return True if this update_id was seen recently. Records the key as seen."""
+	if key in _RECENT_UPDATE_IDS:
+		# Move to end so it stays "hot" in the LRU.
+		_RECENT_UPDATE_IDS.move_to_end(key)
+		return True
+	_RECENT_UPDATE_IDS[key] = None
+	while len(_RECENT_UPDATE_IDS) > _RECENT_UPDATE_IDS_MAX:
+		_RECENT_UPDATE_IDS.popitem(last=False)
+	return False
+
 
 @router.post("/webhook/telegram")
 async def telegram_webhook(request: Request) -> dict[str, bool]:
 	try:
 		data: dict[str, Any] = await request.json()
+
+		# Drop duplicate deliveries. Telegram guarantees update_id is unique per update,
+		# but the same update can be redelivered (Render wake-ups, rolling deploys, etc).
+		update_id = data.get("update_id")
+		if update_id is not None:
+			dedup_key = f"tg:{update_id}"
+			if _is_duplicate_update(dedup_key):
+				logger.info("[WEBHOOK] Dropping duplicate Telegram update_id=%s", update_id)
+				return {"ok": True}
 
 		# Handle inline keyboard button presses
 		callback_query = data.get("callback_query")
@@ -104,6 +133,14 @@ async def whatsapp_webhook(request: Request) -> dict[str, str]:
 		message = messages[0]
 		if not isinstance(message, dict):
 			return {"status": "ok"}
+
+		# Drop duplicate WhatsApp deliveries by message id.
+		wa_message_id = message.get("id")
+		if wa_message_id is not None:
+			dedup_key = f"wa:{wa_message_id}"
+			if _is_duplicate_update(dedup_key):
+				logger.info("[WEBHOOK] Dropping duplicate WhatsApp message id=%s", wa_message_id)
+				return {"status": "ok"}
 
 		phone = message.get("from")
 		text_data = message.get("text")
