@@ -647,5 +647,14 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 		credential.auto_schema_hints = auto_hints
 		await session.commit()
 
+	# Drop any cached LLM-generated example questions for this credential —
+	# the schema may now look quite different, so old examples could be wrong.
+	try:
+		from app.services.example_questions import invalidate_example_cache
+		invalidate_example_cache(credential_id)
+	except Exception:
+		# Cache invalidation must never fail the schema refresh itself.
+		pass
+
 	return blueprint
 

@@ -156,18 +156,64 @@ async def _build_welcome_message(chat_id: str) -> str:
         table_names = _extract_table_names_from_blueprint(credentials.schema_blueprint)
         tables_display = ", ".join(table_names) if table_names else "your business data"
 
+        # Schema-aware example questions (cached per credential).
+        from .example_questions import generate_example_questions
+        examples = await generate_example_questions(
+            company_name=tenant.company_name,
+            schema_blueprint=credentials.schema_blueprint,
+            credential_id=getattr(credentials, "id", None),
+            count=4,
+        )
+        examples_block = "\n".join(f"\u2022 {q}" for q in examples)
+
         return (
             f"Hi! I'm {tenant.company_name}'s data assistant.\n\n"
             f"I can query: {tables_display}\n\n"
             "Try asking me:\n"
-            "\u2022 How many pending tasks?\n"
-            "\u2022 Show tasks assigned to [name]\n"
-            "\u2022 What is [name]'s email?\n"
-            "\u2022 Count records by department\n\n"
+            f"{examples_block}\n\n"
             "Type /help anytime for more examples."
         )
     except Exception:
         return "Hi! I'm ready. Ask me a business question and I'll fetch it from your data."
+
+
+async def _build_help_message(chat_id: str) -> str:
+    """Build a /help reply, using schema-aware example questions when possible."""
+    try:
+        tenant = await get_tenant_by_chat_id(chat_id)
+        if tenant is None:
+            return (
+                "I'm Botivate Bot — your business data assistant. "
+                "Once your account is set up, you can ask me questions about your data in plain English."
+            )
+
+        credentials = await get_tenant_credentials(tenant.id)
+        if not credentials or not credentials.schema_blueprint:
+            return (
+                "Once your database is connected, you can ask me questions like:\n"
+                "• How many records are there?\n"
+                "• Show me the latest entries\n"
+                "• Give me a summary of the data\n\n"
+                "Your database isn't configured yet — contact your admin to finish setup."
+            )
+
+        from .example_questions import generate_example_questions
+        examples = await generate_example_questions(
+            company_name=tenant.company_name,
+            schema_blueprint=credentials.schema_blueprint,
+            credential_id=getattr(credentials, "id", None),
+            count=5,
+        )
+        examples_block = "\n".join(f"• {q}" for q in examples)
+
+        return (
+            "Here are some things you can ask me:\n\n"
+            f"{examples_block}\n\n"
+            "Just type your question naturally!"
+        )
+    except Exception:
+        return "Ask me anything about your business data — counts, lists, lookups, summaries. I'll fetch it."
+
 
 async def _run_postgres_pipeline_for_credential(
     msg: BotMessage, tenant: Any, credential: Any
@@ -721,16 +767,8 @@ async def handle_message(msg: BotMessage) -> None:
             return
 
         if text_normalized in ("help", "/help"):
-            await send_reply(
-                msg,
-                "Here are some things you can ask me:\n\n"
-                "• How many pending tasks are there?\n"
-                "• Show tasks assigned to [name]\n"
-                "• What is the email of [name]?\n"
-                "• Count of tasks by department\n"
-                "• List all employees\n\n"
-                "Just type your question naturally!",
-            )
+            help_msg = await _build_help_message(msg.chat_id)
+            await send_reply(msg, help_msg)
             return
 
         if (msg.platform == Platform.TELEGRAM and text_normalized == "/adddb") or (
