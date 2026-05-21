@@ -7,3 +7,7 @@ CLAUDE.md
 Notes.md
 runtime_memory.json
 Botivate-bot.txt
+
+# Local-only dev portal — never deployed to Render
+app/routers/main_db_portal.py
+static/main_db_portal.html

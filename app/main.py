@@ -35,6 +35,16 @@ from .database import create_tables, _tenant_pools
 from .routers.onboarding import router as onboarding_router
 from .webhook import router as webhook_router
 
+# Dev-only Main DB portal. The file is gitignored and never deployed to Render;
+# the guard below also prevents the routes from mounting unless explicitly enabled.
+_DEV_PORTAL_ENABLED = os.getenv("DEV_PORTAL_ENABLED", "").strip().lower() in ("true", "1", "yes")
+_main_db_portal_router = None
+if _DEV_PORTAL_ENABLED:
+    try:
+        from .routers.main_db_portal import router as _main_db_portal_router  # type: ignore
+    except ImportError:
+        _main_db_portal_router = None
+
 logger = logging.getLogger(__name__)
 STARTUP_DB_INIT_TIMEOUT_SECONDS = float(os.getenv("STARTUP_DB_INIT_TIMEOUT_SECONDS", "15"))
 
@@ -112,6 +122,10 @@ app.include_router(webhook_router)
 app.include_router(admin_router)
 app.include_router(admin_sync_router)
 app.include_router(onboarding_router)
+
+if _main_db_portal_router is not None:
+    app.include_router(_main_db_portal_router)
+    logger.info("[DEV_PORTAL] Main DB dev portal mounted at /api/main-db/* — DO NOT use this in production.")
 
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 if os.path.exists(static_dir):
