@@ -304,7 +304,9 @@ async def _run_postgres_pipeline_for_credential(
     if not reply:
         return {"status": "error"}
 
-    _remember_conversation_context(msg, msg.text, reply, sql=_generated_sql)
+    _remember_conversation_context(
+        msg, msg.text, reply, sql=_generated_sql, result_rows=query_rows,
+    )
 
     if ENABLE_QUERY_LEARNING and _generated_sql is not None and query_rows:
         async def _store_bg() -> None:

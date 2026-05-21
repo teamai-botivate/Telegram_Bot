@@ -103,6 +103,8 @@ PLANNING INSTRUCTIONS:
 7. MULTI-TABLE: If the question asks about multiple tables, query each table separately with UNION ALL.
 8. USER TEXT VALUES: Use LOWER(TRIM(text_column)) = LOWER(TRIM('value')).
 9. FOLLOW-UP QUESTIONS: If the current question is short or vague (e.g. "list all of them", "show me", "what are they?"), look at the RECENT CHAT CONTEXT above and continue the previous query's subject. For example, if the prior message asked about tables and the user says "list all of them", query the same subject (table names).
+9a. NTH-ITEM REFERENCES: If the user refers to a specific position in a prior list ("2nd one", "the third", "the last article", "tell me about #4"), you MUST reuse the EXACT prior SQL from RECENT CHAT CONTEXT and only append `OFFSET (N-1) LIMIT 1` to it. Do NOT add or change an ORDER BY clause — the user's "2nd" refers to whatever order the previous query returned, even if that was insertion order. If the prior SQL already has ORDER BY, keep it identical.
+9b. REPLY-TO QUOTED MESSAGE: If a "USER IS REPLYING TO THIS EARLIER MESSAGE" block appears above with structured data (e.g. a numbered list of items), prefer matching by the exact title/name/value visible in that quoted text over re-deriving it from row ordering.
 10. COUNT + WHO/BY WHOM: GROUP BY appropriately.
 
 SQL REQUIREMENTS:
