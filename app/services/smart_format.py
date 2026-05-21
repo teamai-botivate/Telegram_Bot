@@ -23,7 +23,17 @@ def _format_single_count(question: str, rows: list[dict[str, Any]]) -> str:
     if not label:
         label = "records"
 
-    # Conversational response
+    # Singular/plural agreement and singularization of label for n == 1.
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        n = None
+
+    if n == 1:
+        # Strip trailing "s" so "5 articles" / "1 article".
+        singular_label = label.rstrip().rstrip("s") if label.rstrip().endswith("s") else label
+        return f"There is {val} {singular_label}."
+
     return f"There are {val} {label}."
 
 
@@ -196,12 +206,17 @@ async def _llm_format(
     display_rows: list[dict[str, Any]] = []
     used_chars = 0
     truncated_for_size = False
+    any_cell_truncated = False
 
     for row in sql_results[:500]:
         compact: dict[str, Any] = {}
         for k, v in row.items():
             if isinstance(v, str) and len(v) > MAX_CELL_CHARS:
-                compact[k] = v[:MAX_CELL_CHARS] + "…"
+                # Explicit marker so the LLM knows the data ends here and must
+                # NOT invent the rest. The "[TRUNCATED]" tag is also visible to
+                # the user-facing rules below.
+                compact[k] = v[:MAX_CELL_CHARS] + " […TRUNCATED]"
+                any_cell_truncated = True
             else:
                 compact[k] = v
         row_chars = len(json.dumps(compact, default=str))
@@ -217,12 +232,26 @@ async def _llm_format(
         else "- DO NOT add any note like 'Showing X of Y records' or 'Showing all records'. Just list the data."
     )
 
+    truncated_cell_rule = (
+        "- IMPORTANT: Some text fields end with ' […TRUNCATED]'. That means the full value was cut off. "
+        "You MUST NOT invent, summarize, paraphrase, or extrapolate the rest of the content. "
+        "Quote only what is shown, and tell the user the full text is too long to display if they ask for more detail."
+        if any_cell_truncated
+        else ""
+    )
+
     system_prompt = f"""You are {company_name}'s data assistant answering via WhatsApp and Telegram.
 Your job is to turn raw database results into a clear, helpful, human-readable message.
 
 User Question: "{question}"
 Data ({len(display_rows)} of {total_rows} rows):
 {json.dumps(display_rows, default=str)}
+
+GROUNDING RULES (most important):
+- Use ONLY the data shown above. Do NOT add information from your own knowledge, do NOT invent details, do NOT extrapolate.
+- If the data doesn't answer the user's question, say so honestly: "I don't have that information."
+- If a field is null/empty, treat it as missing — do not guess what it should be.
+{truncated_cell_rule}
 
 FORMATTING RULES:
 - PLAIN TEXT ONLY. No markdown, no asterisks (*) for bold, no **text**.
@@ -233,7 +262,7 @@ FORMATTING RULES:
 - If the data is a list of records, use a numbered list. Skip null/empty rows entirely.
 - DO NOT dump raw JSON keys verbatim. Translate column names into plain English labels.
 - Ignore internal IDs (like row id) unless the user specifically asked for them.
-- Single counts: state conversationally, e.g. "There are 835 pending tasks."
+- Single counts: state conversationally, e.g. "There are 835 pending tasks." Use "is" for 1, "are" for other numbers.
 - Use emojis sparingly only when they genuinely add clarity.
 {truncation_rule}
 - Do not explain your reasoning. Output only the final message."""

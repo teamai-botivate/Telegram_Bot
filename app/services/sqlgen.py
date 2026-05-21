@@ -95,6 +95,14 @@ RULES:
 
 PLANNING INSTRUCTIONS:
 1. DISTINCT: If the question asks "how many people/employees/workers" or "list/name the people" — use COUNT(DISTINCT column) or SELECT DISTINCT.
+1a. INTENT — "what is the latest/newest/highest/most recent/oldest/first/last X":
+    These are NOT count questions. Return the actual value(s) of the row(s), not a COUNT.
+    Use `SELECT <relevant columns> ... ORDER BY <date or version column> DESC LIMIT 1`
+    (or ASC for "oldest/first"). Example: "What is the latest migration version?" →
+    `SELECT version FROM _sqlx_migrations ORDER BY installed_on DESC LIMIT 1`
+    — NOT `SELECT COUNT(*) FROM _sqlx_migrations`.
+1b. INTENT — "how many / count of X":
+    These ARE count questions. Use `SELECT COUNT(*) ...` (or COUNT(DISTINCT) per rule 1).
 2. Only use tables and columns that EXIST in the schema above.
 3. PENDING/STATUS: Look at the schema sample values. Use IS NULL if hinted.
 4. If a PERSON FILTER section appears above, you MUST include those exact WHERE conditions.
