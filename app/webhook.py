@@ -86,7 +86,22 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
 		if not isinstance(text, str) or not text.strip():
 			return {"ok": True}
 
-		msg = BotMessage(platform=Platform.TELEGRAM, chat_id=str(chat_id_value), text=text)
+		# If the user replied-to / quoted an earlier message, capture its text
+		# so the pipeline can resolve "tell me about this" style follow-ups.
+		reply_to_text: str | None = None
+		reply_to_message = message.get("reply_to_message")
+		if isinstance(reply_to_message, dict):
+			rt_text = reply_to_message.get("text") or reply_to_message.get("caption")
+			if isinstance(rt_text, str) and rt_text.strip():
+				# Trim defensively — keep the prompt cheap.
+				reply_to_text = rt_text.strip()[:1500]
+
+		msg = BotMessage(
+			platform=Platform.TELEGRAM,
+			chat_id=str(chat_id_value),
+			text=text,
+			reply_to_text=reply_to_text,
+		)
 		asyncio.create_task(handle_message(msg))
 	except Exception:
 		logger.exception("Error while processing Telegram webhook payload.")

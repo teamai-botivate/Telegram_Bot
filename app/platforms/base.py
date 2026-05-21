@@ -15,6 +15,10 @@ class BotMessage:
     platform: Platform
     chat_id: str
     text: str
+    # When the user replies-to / quotes an earlier message in Telegram, this
+    # carries that quoted text so the pipeline can resolve references like
+    # "tell me more about this" or "what about the last one?".
+    reply_to_text: str | None = None
 
 
 class Sender(Protocol):
