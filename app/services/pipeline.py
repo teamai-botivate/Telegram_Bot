@@ -17,6 +17,7 @@ from .core import (
     RETRIEVAL_FAILURE_MESSAGE,
     DATABASE_CONNECTION_MESSAGE,
     OFF_TOPIC_MESSAGE,
+    pick_off_topic_reply,
 )
 from .llm import _get_openai_client, _call_openai_formatting, is_off_topic, _call_openai_classifier
 from .intent import detect_intent
@@ -721,7 +722,7 @@ async def handle_message(msg: BotMessage) -> None:
         )
 
         if intent_result == "off_topic":
-            await send_reply(msg, OFF_TOPIC_MESSAGE)
+            await send_reply(msg, pick_off_topic_reply(msg.text))
             return
 
         # ── Tier 1: fully onboarded tenant ───────────────────────────────────

@@ -81,6 +81,49 @@ OFF_TOPIC_MESSAGE = (
     "• Count of records by department"
 )
 
+GREETING_REPLY = (
+    "Hi there! 👋 I'm Botivate Bot — your business data assistant.\n\n"
+    "Ask me anything about your company data and I'll fetch the answer in seconds. "
+    "Some examples:\n"
+    "• How many pending tasks?\n"
+    "• Show me sales for last month\n"
+    "• Who is responsible for the open orders?\n\n"
+    "What would you like to know?"
+)
+
+THANKS_REPLY = "You're welcome! Let me know if you'd like to look up anything else. 🙂"
+
+BYE_REPLY = "Goodbye! 👋 I'll be here whenever you need to check on your data."
+
+# Words that should be treated as friendly greetings rather than generic off-topic.
+_GREETING_TRIGGERS = {
+    "hi", "hello", "hey", "hii", "hiii", "hyy", "yo", "sup",
+    "good morning", "good afternoon", "good evening", "good night",
+    "namaste", "hola", "what's up", "whats up",
+    "how are you", "how are you?", "how are u", "how r u",
+    "who are you", "who are you?", "what are you",
+    "ping", "test", "testing",
+}
+
+_THANKS_TRIGGERS = {"thanks", "thank you", "thx", "ty", "thank u", "thanku"}
+
+_FAREWELL_TRIGGERS = {"bye", "goodbye", "see you", "see ya", "cya", "gn", "gnight"}
+
+
+def pick_off_topic_reply(text: str) -> str:
+    """Return a friendlier reply when the off-topic message is clearly a
+    greeting, a thank-you, or a goodbye. Falls back to the generic
+    capabilities message for anything else.
+    """
+    cleaned = (text or "").strip().lower().rstrip("!.?")
+    if cleaned in _GREETING_TRIGGERS:
+        return GREETING_REPLY
+    if cleaned in _THANKS_TRIGGERS:
+        return THANKS_REPLY
+    if cleaned in _FAREWELL_TRIGGERS:
+        return BYE_REPLY
+    return OFF_TOPIC_MESSAGE
+
 # ── Shared client singletons ─────────────────────────────────────────────────
 _openai_client: AsyncOpenAI | None = None  # type: ignore[assignment]
 _fast_llm_client: AsyncOpenAI | None = None  # type: ignore[assignment]
