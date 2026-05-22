@@ -48,54 +48,105 @@ A successful response looks like `{"ok":true,"result":true,"description":"Webhoo
 
 ## 2. WhatsApp (Meta Cloud API)
 
-WhatsApp Business messaging is provided by Meta's Cloud API. You need a Meta Developer account and a verified WhatsApp Business phone number.
+WhatsApp Business messaging is provided by Meta's Cloud API. The dev flow uses Meta's free test phone number, which is enough to verify the full pipeline end-to-end before you bring a real business number.
 
-### `WHATSAPP_TOKEN`
+You need four env vars:
 
-This is a permanent access token for the WhatsApp Cloud API.
+```bash
+WHATSAPP_TOKEN=EAAB...                 # Bearer token
+WHATSAPP_PHONE_NUMBER_ID=1234567890    # the number that SENDS your bot's replies
+WHATSAPP_BUSINESS_ACCOUNT_ID=987654    # the parent WABA
+WEBHOOK_VERIFY_TOKEN=my-random-string  # YOU pick this — used in Meta's webhook handshake
+```
 
-**Steps to obtain:**
+Optional: `WHATSAPP_API_VERSION` (default `v22.0`). Update yearly as Meta deprecates older Graph API versions.
 
-1. Go to `https://developers.facebook.com` and sign in.
-2. Create a new app: **My Apps → Create App → Business**.
-3. Add the **WhatsApp** product to your app from the product list on the left sidebar.
-4. Open **WhatsApp → API Setup**. You will see a temporary 24-hour token at the top — this works for development but expires too quickly for production.
-5. For a permanent token, go to **Business Settings → System Users**, create a new system user with **Admin** access, and click **Generate New Token**. Select your app, set the token to **Never expire**, and grant the `whatsapp_business_messaging` and `whatsapp_business_management` permissions.
-6. Copy the generated token. This is your `WHATSAPP_TOKEN`.
+### Step A — Create or open your Meta Developer App
 
-### `WHATSAPP_PHONE_NUMBER_ID`
+1. Sign in at `https://developers.facebook.com/apps`.
+2. Click **Create App** (or open an existing one). Pick **Business** as the use case.
+3. Once in the app dashboard, click **Add product** and add **WhatsApp**.
 
-This is the ID of the phone number that will send messages.
+> If you already have apps listed (like `Botivate Assistant` in your dashboard), pick one and skip the create step. The "In development" mode is fine for dev — Meta's test number works as long as the app isn't archived.
 
-**Steps to obtain:**
+### Step B — Get `WHATSAPP_TOKEN` (temporary, for dev)
 
-1. In the Meta Developer dashboard, go to **WhatsApp → API Setup**.
-2. Under the **From** dropdown, you'll see your test phone number and its ID.
-3. The ID is a long numeric string displayed below the dropdown, labelled **Phone number ID**. Copy that value.
-4. For production, you must add a real business phone number under **WhatsApp → Phone Numbers** and verify it via SMS or voice call. The verified number's ID then replaces the test ID.
+1. In the left sidebar, go to **WhatsApp → API Setup**.
+2. At the top of the page, you'll see **Temporary access token**. Click the eye icon to reveal, then copy it.
+3. Paste it into your Render env var as `WHATSAPP_TOKEN`.
 
-### `WHATSAPP_BUSINESS_ACCOUNT_ID`
+This temporary token lasts **24 hours**. That's enough for a day's testing. When it expires, just come back to the same page and copy the new one.
 
-This is the ID of the WhatsApp Business Account that owns your phone number.
+For **production**, you need a permanent token via a System User:
+- Go to `business.facebook.com` → **Settings → Users → System Users**.
+- Click **Add**, give it a name like `Botivate Bot`, role **Admin**.
+- Click **Generate New Token**, select your WhatsApp app, set expiry to **Never**, and grant the `whatsapp_business_messaging` and `whatsapp_business_management` permissions.
+- Copy the generated token and replace `WHATSAPP_TOKEN` in Render.
 
-**Steps to obtain:**
+### Step C — Get `WHATSAPP_PHONE_NUMBER_ID`
 
-1. In Meta Business Suite (`business.facebook.com`), go to **Settings → Business Assets → WhatsApp Accounts**.
-2. Select your WhatsApp Business Account.
-3. The numeric ID is shown in the top-right corner, or in the URL. Copy it.
+1. Still on **WhatsApp → API Setup**.
+2. Under the **From** dropdown you'll see Meta's test phone number (something like `+1 555 ...`) with a small **Phone number ID** label beneath it.
+3. Copy that numeric ID (looks like `123456789012345`) — that's `WHATSAPP_PHONE_NUMBER_ID`.
 
-### `WEBHOOK_VERIFY_TOKEN`
+The test number can only send to phone numbers you explicitly add as **recipients** in the same page:
+- Under **To**, click **Manage phone number list** and add your own number.
+- Meta sends you a one-time code on WhatsApp to verify ownership. Enter it.
+- That number can now receive messages from your bot.
 
-This is a string **you choose** to verify Meta's webhook handshake. It is not issued by Meta — you make it up and put the same value in both the Render env vars and the Meta dashboard.
+You can add up to 5 recipient numbers for the test phone. To talk to more people, you have to register a real business phone number under **WhatsApp → Phone Numbers**.
 
-**Steps:**
+### Step D — Get `WHATSAPP_BUSINESS_ACCOUNT_ID`
 
-1. Generate a random string, e.g. `openssl rand -hex 24` produces something like `a3f1b9c2e7d4a8f5b1c9e2d7a4f1b8c5`.
-2. Set this as `WEBHOOK_VERIFY_TOKEN` in your `.env` and Render.
-3. In the Meta Developer dashboard, go to **WhatsApp → Configuration → Webhook**.
-4. Click **Edit**. Set the **Callback URL** to `https://<your-render-service>.onrender.com/webhook/whatsapp` and paste the same verify token into the **Verify token** field.
-5. Click **Verify and Save**. Meta will send a GET request to your endpoint with `hub.mode=subscribe`, `hub.verify_token=<your token>`, and `hub.challenge=<random>`. The backend (`app/webhook.py`) returns the challenge if the token matches.
-6. Subscribe to the **messages** webhook field so inbound messages are delivered.
+1. Still on **WhatsApp → API Setup**.
+2. Look for **WhatsApp Business Account ID** under the phone number section (or in the URL when you're in **Business Settings → WhatsApp Accounts**).
+3. Copy that numeric ID — that's `WHATSAPP_BUSINESS_ACCOUNT_ID`.
+
+The bot currently doesn't use this field at runtime (only the phone number ID matters for sending), but Meta sometimes requires it for webhook subscription scopes, so keep it set.
+
+### Step E — Make up `WEBHOOK_VERIFY_TOKEN`
+
+This is **not** issued by Meta. You invent it, then give the same value to both Render and Meta. Meta uses it in a one-time challenge to confirm you own the webhook URL.
+
+1. Generate a random string locally:
+   ```bash
+   openssl rand -hex 24
+   ```
+   Output looks like `a3f1b9c2e7d4a8f5b1c9e2d7a4f1b8c5e2d7a4f1b8c5e2d7`.
+2. Set it in Render as `WEBHOOK_VERIFY_TOKEN`. Save.
+3. Wait for Render to redeploy with the new value (so the server can answer the challenge).
+
+### Step F — Register the webhook in Meta
+
+1. In the Meta Developer dashboard, go to **WhatsApp → Configuration**.
+2. Find the **Webhook** section. Click **Edit**.
+3. Fill in:
+   - **Callback URL**: `https://<your-render-service>.onrender.com/webhook/whatsapp`
+   - **Verify token**: the exact same string you set as `WEBHOOK_VERIFY_TOKEN`
+4. Click **Verify and Save**. Meta sends a `GET /webhook/whatsapp?hub.mode=subscribe&hub.verify_token=<your-token>&hub.challenge=<random>` to your server. The backend ([app/webhook.py](app/webhook.py)) echoes back the challenge if the token matches.
+5. After the green checkmark appears, scroll to **Webhook fields** and click **Manage**.
+6. Subscribe to the **messages** field. (You can ignore `message_status`, `message_template_status_update`, etc. for now — they're for production analytics.)
+
+### Step G — Send your first test message
+
+1. From your verified phone number, open WhatsApp and send a message to Meta's test number (the one you saw in step C).
+2. In Render logs you should see:
+   ```
+   INFO:     <ip>:0 - "POST /webhook/whatsapp HTTP/1.1" 200 OK
+   [WEBHOOK] ... (processing)
+   WhatsApp send chunk 1/1 to=<your number> status=200
+   ```
+3. Within ~3-5 seconds, you should receive a reply from the test number on WhatsApp.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Meta's "Verify and Save" fails | `WEBHOOK_VERIFY_TOKEN` mismatch or service not yet redeployed | Wait ~30s after setting the env var, then retry. Check Render logs for a 4xx on `GET /webhook/whatsapp`. |
+| Bot doesn't reply (no logs on Render) | Webhook field not subscribed | Re-open **WhatsApp → Configuration → Webhook fields → Manage** and confirm `messages` is enabled. |
+| `WhatsApp send failed status=401` in logs | Token expired (24h dev token) or revoked | Copy a fresh token from **API Setup** and update Render. |
+| `WhatsApp send failed status=400 ... not in allowed list` | Recipient not added in dev mode | Add the user's number under **API Setup → To → Manage phone number list**. |
+| `WhatsApp send failed status=400 ... 24-hour customer service window` | Bot replied >24h after the user's last message | This won't happen in normal use since every reply is in response to an inbound message. Only matters if you try to send unsolicited messages — use approved templates for that. |
 
 ---
 

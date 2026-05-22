@@ -161,8 +161,31 @@ async def whatsapp_webhook(request: Request) -> dict[str, str]:
 		text_data = message.get("text")
 		text = text_data.get("body") if isinstance(text_data, dict) else None
 
+		# If the user used WhatsApp's reply-to-message feature, Meta includes
+		# a `context` object with the original message id. Some platforms (and
+		# some delivery contexts) also include a `referred_product` block or
+		# inline quoted text — capture whatever we can so the LLM has context.
+		# Note: unlike Telegram, WhatsApp does NOT include the full quoted text
+		# in the webhook by default — only the message id. We fall back to the
+		# in-memory conversation history (which the pipeline already builds)
+		# for resolving "this" / "that" references.
+		reply_to_text: str | None = None
+		ctx = message.get("context")
+		if isinstance(ctx, dict):
+			# Best-effort: Meta sometimes sets `quoted_text` in product reply
+			# payloads. If it's missing, the conversation-history fallback in
+			# _build_conversation_context_block still helps.
+			rt = ctx.get("quoted_text") or ctx.get("text")
+			if isinstance(rt, str) and rt.strip():
+				reply_to_text = rt.strip()[:1500]
+
 		if isinstance(phone, str) and isinstance(text, str) and phone and text:
-			msg = BotMessage(platform=Platform.WHATSAPP, chat_id=phone, text=text)
+			msg = BotMessage(
+				platform=Platform.WHATSAPP,
+				chat_id=phone,
+				text=text,
+				reply_to_text=reply_to_text,
+			)
 			asyncio.create_task(handle_message(msg))
 	except Exception:
 		logger.exception("Error while processing WhatsApp webhook payload.")
