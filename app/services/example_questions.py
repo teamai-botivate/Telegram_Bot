@@ -65,30 +65,46 @@ async def generate_example_questions(
     # a rough sense of the tables/columns to pick natural example questions.
     blueprint_snippet = schema_blueprint[:4000]
 
+    # Build an explicit JSON skeleton so the model sees exactly how many items
+    # we want, with placeholder slots. This drastically improves compliance,
+    # especially for reasoning-style models like gpt-oss-120b that otherwise
+    # truncate mid-array when max_tokens is tight.
+    skeleton_items = ", ".join([f'"question {i + 1}"' for i in range(count)])
+    json_skeleton = f'{{"questions": [{skeleton_items}]}}'
+
     system_prompt = (
         f"You are a helpful onboarding assistant for {company_name}'s data bot. "
-        f"Given a database schema, suggest {count} short, friendly natural-language "
-        "questions a non-technical business user could ask about this data. "
-        "Questions must be:\n"
+        f"Given a database schema, suggest EXACTLY {count} short, friendly "
+        "natural-language questions a non-technical business user could ask "
+        "about this data.\n\n"
+        "Each question must be:\n"
         "- Natural human English, not SQL.\n"
         "- Specific to the actual tables/columns in this schema (not generic).\n"
         "- Useful for first-time users exploring what they can ask.\n"
         "- Short (under 10 words each).\n"
         "- Varied: mix counts, lists, lookups, filters.\n\n"
-        f"Return ONLY a valid JSON object with this exact shape, no prose, no markdown fences: "
-        f'{{"questions": ["...", "...", "...", "..."]}}'
+        f"You MUST return exactly {count} questions as a JSON object. Output "
+        "ONLY the JSON object — no prose, no markdown fences, no commentary.\n"
+        f"Shape: {json_skeleton}"
     )
 
-    user_prompt = f"DATABASE SCHEMA:\n{blueprint_snippet}\n\nGenerate {count} example questions."
+    user_prompt = (
+        f"DATABASE SCHEMA:\n{blueprint_snippet}\n\n"
+        f"Generate EXACTLY {count} example questions in the required JSON format. "
+        f"The 'questions' array MUST contain exactly {count} items."
+    )
 
     raw = ""
     model = "<unknown>"
     try:
         client, model = _get_examples_llm_client()
+        # 800 tokens is enough for ~5 short questions + JSON wrapping + any
+        # reasoning overhead the model uses internally. Smaller budgets caused
+        # gpt-oss-120b to truncate mid-array.
         completion = await client.chat.completions.create(
             model=model,
             temperature=0.4,
-            max_tokens=400,
+            max_tokens=800,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -137,6 +153,16 @@ async def generate_example_questions(
 
         if not questions:
             raise ValueError(f"no usable questions parsed; raw[:300]={raw[:300]!r}")
+
+        # If the model returned fewer items than requested, log it explicitly so
+        # we can diagnose. We still return what we got rather than failing —
+        # something is better than the generic fallback.
+        if len(questions) < count:
+            logger.warning(
+                "[EXAMPLES] Model returned %d/%d questions (model=%s); "
+                "consider raising max_tokens or sharpening the prompt. raw_tail=%r",
+                len(questions), count, model, raw[-300:],
+            )
 
         questions = questions[:count]
         if cache_key:
