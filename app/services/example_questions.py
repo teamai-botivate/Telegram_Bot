@@ -81,6 +81,8 @@ async def generate_example_questions(
 
     user_prompt = f"DATABASE SCHEMA:\n{blueprint_snippet}\n\nGenerate {count} example questions."
 
+    raw = ""
+    model = "<unknown>"
     try:
         client, model = _get_examples_llm_client()
         completion = await client.chat.completions.create(
@@ -93,29 +95,48 @@ async def generate_example_questions(
             ],
         )
         raw = (completion.choices[0].message.content or "").strip()
-        # Be lenient: extract the first JSON object even if the model wrapped
-        # it in prose or markdown fences (Cerebras / Groq don't always honor
-        # response_format).
-        match = re.search(r"\{.*?\}", raw, re.DOTALL)
-        if not match:
-            raise ValueError(f"no JSON object found in: {raw[:200]!r}")
-        parsed = json.loads(match.group(0))
-        questions_raw = parsed.get("questions", [])
-        if not isinstance(questions_raw, list):
-            raise ValueError("'questions' is not a list")
+
+        # Strip common wrappers: ```json ... ``` fences, leading "Here is..." prose
+        cleaned = raw
+        # Remove markdown fences.
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
         questions: list[str] = []
+
+        # Strategy 1: parse the cleaned text as JSON directly.
+        try:
+            parsed = json.loads(cleaned)
+            questions_raw = parsed.get("questions", []) if isinstance(parsed, dict) else parsed
+        except Exception:
+            # Strategy 2: extract the OUTERMOST JSON object by balanced-brace scan.
+            questions_raw = []
+            obj_text = _extract_outer_json_object(cleaned)
+            if obj_text:
+                try:
+                    parsed = json.loads(obj_text)
+                    if isinstance(parsed, dict):
+                        questions_raw = parsed.get("questions", [])
+                except Exception:
+                    pass
+
+            # Strategy 3 (last resort): pull any quoted strings that look like questions.
+            if not questions_raw:
+                questions_raw = re.findall(r'"([^"\n]{8,120}\?)"', cleaned)
+
+        if not isinstance(questions_raw, list):
+            raise ValueError(f"'questions' is not a list, got: {type(questions_raw).__name__}")
+
         for q in questions_raw:
             if not isinstance(q, str):
                 continue
             q = q.strip().rstrip("?") + "?"
-            # Strip leading numbering or bullets the model sometimes adds
             q = re.sub(r"^[\s\-•*\d.\)]+", "", q).strip()
             if 3 <= len(q) <= 120:
                 questions.append(q)
 
         if not questions:
-            raise ValueError("no usable questions returned")
+            raise ValueError(f"no usable questions parsed; raw[:300]={raw[:300]!r}")
 
         questions = questions[:count]
         if cache_key:
@@ -127,5 +148,43 @@ async def generate_example_questions(
         return questions
 
     except Exception as exc:
-        logger.warning("[EXAMPLES] Generation failed (%s); using generic fallback.", exc)
+        # Surface the raw model output so we can diagnose silent failures.
+        logger.warning(
+            "[EXAMPLES] Generation failed (model=%s err=%s); raw=%r; using generic fallback.",
+            model, exc, raw[:500] if raw else "<empty>",
+        )
         return _GENERIC_FALLBACK[:count]
+
+
+def _extract_outer_json_object(text: str) -> str | None:
+    """Find the outermost {...} block via balanced-brace scan.
+
+    Handles cases where the LLM wraps the JSON in prose. Returns None if no
+    balanced object is found.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None

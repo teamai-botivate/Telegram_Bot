@@ -43,8 +43,11 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "model": "llama-3.3-70b-versatile",
     },
     "cerebras": {
+        # Cerebras's current Llama 3.3 70B slug is not universally available.
+        # gpt-oss-120b is on the Production tier with 65k context and the
+        # fastest inference Cerebras offers.
         "base_url": "https://api.cerebras.ai/v1",
-        "model": "llama-3.3-70b",
+        "model": "gpt-oss-120b",
     },
     "openai": {
         "base_url": "",  # empty → default OpenAI endpoint
