@@ -68,12 +68,21 @@ async def send_message(to: str, text: str) -> None:
                 "WhatsApp send chunk %d/%d to=%s status=%s",
                 i, len(chunks), to, response.status_code,
             )
+
             if response.status_code >= 400:
-                # Surface Meta's error body — usually a JSON object with
-                # {"error": {"message": "...", "code": ...}} that's hugely
-                # useful when debugging webhook misconfigurations.
+                # Surface Meta's error body — usually {"error": {"message", "code", ...}}.
+                # We log a single ERROR line and return cleanly rather than raising,
+                # because most 4xx errors are user-side (recipient not allowed,
+                # 24h window closed, blocked number) and shouldn't pollute logs
+                # with a stack trace on every occurrence. 5xx still raises so the
+                # caller can decide whether to retry.
+                body_snippet = response.text[:500]
                 logger.error(
-                    "WhatsApp send failed status=%s body=%s",
-                    response.status_code, response.text[:500],
+                    "WhatsApp send failed status=%s to=%s body=%s",
+                    response.status_code, to, body_snippet,
                 )
-            response.raise_for_status()
+                if 400 <= response.status_code < 500:
+                    # Stop sending further chunks — they'll all fail with the
+                    # same client-side reason. Return cleanly.
+                    return
+                response.raise_for_status()
