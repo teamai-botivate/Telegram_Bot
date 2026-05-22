@@ -13,8 +13,8 @@ import json
 import re
 from typing import Any
 
-from .core import logger, OPENAI_API_KEY, SQL_GENERATION_MODEL
-from .llm import _get_openai_client
+from .core import logger
+from .llm import _get_examples_llm_client
 
 
 # ── Cache ────────────────────────────────────────────────────────────────────
@@ -61,10 +61,6 @@ async def generate_example_questions(
     if not schema_blueprint or not schema_blueprint.strip():
         return _GENERIC_FALLBACK[:count]
 
-    if not OPENAI_API_KEY:
-        logger.debug("[EXAMPLES] OPENAI_API_KEY not set — using generic fallback.")
-        return _GENERIC_FALLBACK[:count]
-
     # Keep prompt small — schema blueprints can be large, but we only need
     # a rough sense of the tables/columns to pick natural example questions.
     blueprint_snippet = schema_blueprint[:4000]
@@ -79,26 +75,31 @@ async def generate_example_questions(
         "- Useful for first-time users exploring what they can ask.\n"
         "- Short (under 10 words each).\n"
         "- Varied: mix counts, lists, lookups, filters.\n\n"
-        f"Return ONLY valid JSON of this shape: "
+        f"Return ONLY a valid JSON object with this exact shape, no prose, no markdown fences: "
         f'{{"questions": ["...", "...", "...", "..."]}}'
     )
 
     user_prompt = f"DATABASE SCHEMA:\n{blueprint_snippet}\n\nGenerate {count} example questions."
 
     try:
-        client = _get_openai_client()
+        client, model = _get_examples_llm_client()
         completion = await client.chat.completions.create(
-            model=SQL_GENERATION_MODEL,
+            model=model,
             temperature=0.4,
             max_tokens=400,
-            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        raw = completion.choices[0].message.content or "{}"
-        parsed = json.loads(raw)
+        raw = (completion.choices[0].message.content or "").strip()
+        # Be lenient: extract the first JSON object even if the model wrapped
+        # it in prose or markdown fences (Cerebras / Groq don't always honor
+        # response_format).
+        match = re.search(r"\{.*?\}", raw, re.DOTALL)
+        if not match:
+            raise ValueError(f"no JSON object found in: {raw[:200]!r}")
+        parsed = json.loads(match.group(0))
         questions_raw = parsed.get("questions", [])
         if not isinstance(questions_raw, list):
             raise ValueError("'questions' is not a list")
@@ -120,7 +121,8 @@ async def generate_example_questions(
         if cache_key:
             _example_cache[cache_key] = questions
         logger.info(
-            "[EXAMPLES] Generated %d questions for credential=%s", len(questions), cache_key,
+            "[EXAMPLES] Generated %d questions for credential=%s model=%s",
+            len(questions), cache_key, model,
         )
         return questions
 

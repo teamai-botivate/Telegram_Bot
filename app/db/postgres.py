@@ -649,11 +649,37 @@ async def refresh_schema_blueprint(tenant_id: uuid.UUID | str) -> str:
 
 	# Drop any cached LLM-generated example questions for this credential —
 	# the schema may now look quite different, so old examples could be wrong.
+	# Then pre-warm the cache in the background so the user's next /start is
+	# instant rather than waiting on an LLM round-trip.
 	try:
-		from app.services.example_questions import invalidate_example_cache
+		import asyncio as _asyncio
+		from app.services.example_questions import (
+			generate_example_questions,
+			invalidate_example_cache,
+		)
 		invalidate_example_cache(credential_id)
+
+		async def _prewarm_examples() -> None:
+			try:
+				# Look up the tenant's company name for the prompt.
+				async with session_factory() as _s:
+					cred = await _s.get(TenantDBCredential, credential_id)
+					if cred is None:
+						return
+					tenant = await _s.get(Tenant, cred.tenant_id)
+					company_name = tenant.company_name if tenant else "your"
+				await generate_example_questions(
+					company_name=company_name,
+					schema_blueprint=blueprint,
+					credential_id=credential_id,
+					count=5,
+				)
+			except Exception as exc:
+				logger.debug("[EXAMPLES] Pre-warm failed: %s", exc)
+
+		_asyncio.create_task(_prewarm_examples())
 	except Exception:
-		# Cache invalidation must never fail the schema refresh itself.
+		# Cache invalidation / pre-warm must never fail the schema refresh itself.
 		pass
 
 	return blueprint

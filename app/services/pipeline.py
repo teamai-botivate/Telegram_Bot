@@ -18,6 +18,7 @@ from .core import (
     DATABASE_CONNECTION_MESSAGE,
     OFF_TOPIC_MESSAGE,
     pick_off_topic_reply,
+    is_greeting,
 )
 from .llm import _get_openai_client, _call_openai_formatting, is_off_topic, _call_openai_classifier
 from .intent import detect_intent
@@ -813,7 +814,14 @@ async def handle_message(msg: BotMessage) -> None:
 
         # ── Tenant exists. Off-topic messages get a friendly reply. ────────
         if intent_result == "off_topic":
-            await send_reply(msg, pick_off_topic_reply(msg.text))
+            # Greetings from an onboarded tenant should be personalised with
+            # the schema-aware welcome (with cached example questions),
+            # not the generic "I can only help with business data" fallback.
+            if is_greeting(msg.text):
+                welcome = await _build_welcome_message(msg.chat_id)
+                await send_reply(msg, welcome)
+            else:
+                await send_reply(msg, pick_off_topic_reply(msg.text))
             return
 
         # ── Pick which DB(s) to query ───────────────────────────────────────

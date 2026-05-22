@@ -12,6 +12,10 @@ from .core import (
     RESPONSE_FORMAT_MODEL,
     SQL_GENERATION_MODEL,
     OFF_TOPIC_CLASSIFIER_MODEL,
+    EXAMPLES_LLM_PROVIDER,
+    EXAMPLES_LLM_API_KEY,
+    EXAMPLES_LLM_MODEL,
+    EXAMPLES_LLM_BASE_URL,
     _openai_import_error,
     _openai_client,
     _fast_llm_client,
@@ -73,6 +77,37 @@ def _get_fast_llm_client() -> AsyncOpenAI:
         )
 
     return core._fast_llm_client
+
+
+# ── Examples LLM client (independent override; defaults to fast LLM) ────────
+
+def _get_examples_llm_client() -> tuple[AsyncOpenAI, str]:
+    """Return (client, model_name) used for generating welcome example questions.
+
+    Resolution order:
+      1. If EXAMPLES_LLM_PROVIDER + EXAMPLES_LLM_API_KEY are set, use that
+         (e.g. Cerebras for sub-second latency).
+      2. Otherwise fall back to the fast LLM (Groq / Cerebras / OpenAI mini).
+    """
+    from . import core
+
+    if _openai_import_error is not None:
+        raise RuntimeError("openai package is not installed.")
+
+    if EXAMPLES_LLM_PROVIDER and EXAMPLES_LLM_API_KEY and EXAMPLES_LLM_MODEL:
+        if core._examples_llm_client is None:
+            core._examples_llm_client = AsyncOpenAI(
+                api_key=EXAMPLES_LLM_API_KEY,
+                base_url=EXAMPLES_LLM_BASE_URL or None,
+            )
+            logger.info(
+                "[EXAMPLES_LLM] Initialized %s client: model=%s base_url=%s",
+                EXAMPLES_LLM_PROVIDER, EXAMPLES_LLM_MODEL, EXAMPLES_LLM_BASE_URL,
+            )
+        return core._examples_llm_client, EXAMPLES_LLM_MODEL
+
+    # Fallback — use the fast LLM client and its model.
+    return _get_fast_llm_client(), FAST_LLM_MODEL
 
 
 # ── LLM call wrappers ────────────────────────────────────────────────────────

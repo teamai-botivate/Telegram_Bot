@@ -63,6 +63,20 @@ RESPONSE_FORMAT_MODEL = os.getenv("RESPONSE_FORMAT_MODEL", FAST_LLM_MODEL)
 OFF_TOPIC_CLASSIFIER_MODEL = os.getenv("OFF_TOPIC_CLASSIFIER_MODEL", FAST_LLM_MODEL)
 DB_ROUTER_MODEL = os.getenv("DB_ROUTER_MODEL", FAST_LLM_MODEL)
 
+# Example-question generator runs on the fast LLM by default. For lowest latency
+# you can set EXAMPLES_LLM_PROVIDER=cerebras + EXAMPLES_LLM_API_KEY=csk_... and
+# EXAMPLES_LLM_MODEL=llama-3.3-70b — Cerebras returns the response in ~300ms,
+# which makes the /start welcome message feel instant.
+EXAMPLES_LLM_PROVIDER = os.getenv("EXAMPLES_LLM_PROVIDER", "").strip().lower() or None
+EXAMPLES_LLM_API_KEY = os.getenv("EXAMPLES_LLM_API_KEY", "").strip() or None
+EXAMPLES_LLM_MODEL = os.getenv("EXAMPLES_LLM_MODEL", "").strip() or None
+if EXAMPLES_LLM_PROVIDER and not EXAMPLES_LLM_MODEL:
+    EXAMPLES_LLM_MODEL = _PROVIDER_DEFAULTS.get(EXAMPLES_LLM_PROVIDER, {}).get("model")
+EXAMPLES_LLM_BASE_URL = (
+    _PROVIDER_DEFAULTS.get(EXAMPLES_LLM_PROVIDER, {}).get("base_url", "")
+    if EXAMPLES_LLM_PROVIDER else ""
+)
+
 ENABLE_QUERY_LEARNING = os.getenv("ENABLE_QUERY_LEARNING", "true").lower() in ("true", "1", "yes")
 
 # ── User-facing messages ─────────────────────────────────────────────────────
@@ -110,6 +124,16 @@ _THANKS_TRIGGERS = {"thanks", "thank you", "thx", "ty", "thank u", "thanku"}
 _FAREWELL_TRIGGERS = {"bye", "goodbye", "see you", "see ya", "cya", "gn", "gnight"}
 
 
+def is_greeting(text: str) -> bool:
+    """Return True if the text is a plain greeting (hi/hello/good morning/etc).
+
+    Used to give tenants a personalised welcome (with schema-aware example
+    questions) instead of the generic GREETING_REPLY.
+    """
+    cleaned = (text or "").strip().lower().rstrip("!.?")
+    return cleaned in _GREETING_TRIGGERS
+
+
 def pick_off_topic_reply(text: str) -> str:
     """Return a friendlier reply when the off-topic message is clearly a
     greeting, a thank-you, or a goodbye. Falls back to the generic
@@ -127,3 +151,4 @@ def pick_off_topic_reply(text: str) -> str:
 # ── Shared client singletons ─────────────────────────────────────────────────
 _openai_client: AsyncOpenAI | None = None  # type: ignore[assignment]
 _fast_llm_client: AsyncOpenAI | None = None  # type: ignore[assignment]
+_examples_llm_client: AsyncOpenAI | None = None  # type: ignore[assignment]
