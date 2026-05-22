@@ -31,7 +31,7 @@ async def store_query_example(
         logger.warning("store_query_example: DATABASE_URL not configured, skipping.")
         return None
 
-    from .embeddings import embed_text
+    from app.embeddings import embed_text
 
     embedding = await embed_text(question)
     if embedding is None:
@@ -99,7 +99,7 @@ async def retrieve_similar_examples(
     if precomputed_embedding is not None:
         embedding = precomputed_embedding
     else:
-        from .embeddings import embed_text
+        from app.embeddings import embed_text
         embedding = await embed_text(question)
 
     if embedding is None:
