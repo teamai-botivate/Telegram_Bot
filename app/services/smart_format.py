@@ -4,6 +4,7 @@ fast LLM for complex results. Tracks patterns for continuous improvement.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .core import logger
@@ -202,6 +203,31 @@ async def _llm_format(
     MAX_TOTAL_CHARS = 12_000      # ~3k tokens of row data — leaves room for prompt
     SAMPLE_RATIO = 4              # Keep 1 row per N when over budget
 
+    # UUID pattern (with or without dashes) — these are internal DB IDs that
+    # non-technical users don't want to see in the reply. Matched case-insensitively.
+    UUID_RE = re.compile(
+        r"^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$",
+        re.IGNORECASE,
+    )
+
+    def _is_uuid(v: Any) -> bool:
+        if v is None:
+            return False
+        return isinstance(v, str) and bool(UUID_RE.match(v.strip()))
+
+    def _is_internal_id_column(key: Any) -> bool:
+        """Detect columns that contain internal identifiers users don't care about.
+        Examples: id, author_id, user_id, content_gdoc_id, *_uuid.
+        We deliberately keep meaningful "id-like" columns visible by checking
+        the value shape too — numeric IDs (order_id=1234) stay; UUIDs don't.
+        """
+        if not isinstance(key, str):
+            return False
+        lk = key.lower()
+        if lk == "id" or lk.endswith("_id") or lk.endswith("_uuid") or lk == "uuid":
+            return True
+        return False
+
     total_rows = len(sql_results)
     display_rows: list[dict[str, Any]] = []
     used_chars = 0
@@ -211,6 +237,11 @@ async def _llm_format(
     for row in sql_results[:500]:
         compact: dict[str, Any] = {}
         for k, v in row.items():
+            # Drop internal-ID columns whose values are UUIDs. Numeric IDs
+            # (e.g. order #1234) stay visible because they're often meaningful
+            # to business users.
+            if _is_internal_id_column(k) and _is_uuid(v):
+                continue
             if isinstance(v, str) and len(v) > MAX_CELL_CHARS:
                 # Explicit marker so the LLM knows the data ends here and must
                 # NOT invent the rest. The "[TRUNCATED]" tag is also visible to
