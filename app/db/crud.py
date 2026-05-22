@@ -28,6 +28,30 @@ async def create_tables() -> None:
 	async with meta_engine.begin() as connection:
 		await connection.run_sync(Base.metadata.create_all)
 
+def _wa_phone_variants(raw: str) -> list[str]:
+    """Return the set of plausible WhatsApp number formats for matching.
+
+    WhatsApp's Cloud API delivers the sender as digits-only ('917499938218'),
+    but database rows are normalised to E.164 with a leading '+' ('+917499938218'),
+    and some legacy rows may have spaces, dashes, or no country code at all.
+    Match on every reasonable variant so we never miss a registered client
+    purely because of formatting drift.
+    """
+    if not raw:
+        return []
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return []
+    variants = {raw, digits, f"+{digits}"}
+    # Also try with/without a leading '91' in case the original record skipped
+    # the country code (common for India-only datasets).
+    if digits.startswith("91") and len(digits) > 10:
+        local = digits[2:]
+        variants.add(local)
+        variants.add(f"+{local}")
+    return list(variants)
+
+
 async def find_registered_client_by_chat(
     platform: str,
     chat_id: str,
@@ -36,7 +60,9 @@ async def find_registered_client_by_chat(
     """Look up a pre-registered (not yet onboarded) client by their platform handle.
 
     Telegram: match on telegram_chat_id.
-    WhatsApp: match on whatsapp_number OR phone_number (both stored in E.164 format).
+    WhatsApp: match on whatsapp_number OR phone_number across several plausible
+    format variants (with/without '+', country code, etc.) because the inbound
+    chat_id from Meta is digits-only but stored numbers are E.164 with '+'.
     Returns None if not found or the session factory is unconfigured.
     """
     if session_factory is None:
@@ -51,10 +77,16 @@ async def find_registered_client_by_chat(
                 RegisteredClient.is_active.is_(True),
             )
         else:
-            # WhatsApp: chat_id is the sender's phone number; also check phone_number column.
-            conditions = [RegisteredClient.whatsapp_number == chat_id]
+            # WhatsApp: chat_id is the sender's phone number. Build all plausible
+            # format variants and OR them together.
+            chat_variants = _wa_phone_variants(chat_id)
+            conditions = [RegisteredClient.whatsapp_number.in_(chat_variants)]
             if phone:
-                conditions.append(RegisteredClient.phone_number == phone)
+                phone_variants = _wa_phone_variants(phone)
+                conditions.append(RegisteredClient.phone_number.in_(phone_variants))
+            # Also let chat_variants match the phone_number column, since some
+            # clients only have phone_number filled in.
+            conditions.append(RegisteredClient.phone_number.in_(chat_variants))
             stmt = select(RegisteredClient).where(
                 or_(*conditions),
                 RegisteredClient.is_active.is_(True),
@@ -67,7 +99,16 @@ async def get_tenant_by_chat_id(chat_id: str) -> Tenant | None:
 	if session_factory is None:
 		raise RuntimeError("DATABASE_URL is not configured. Add it to your .env file.")
 
-	statement = select(Tenant).where(or_(Tenant.telegram_chat_id == chat_id, Tenant.whatsapp_number == chat_id))
+	# WhatsApp number formats can drift (digits-only vs '+'-prefixed vs local).
+	# Match on every plausible variant so we never miss a tenant purely because
+	# of formatting differences between Meta's webhook payload and stored data.
+	wa_variants = _wa_phone_variants(chat_id)
+	statement = select(Tenant).where(
+		or_(
+			Tenant.telegram_chat_id == chat_id,
+			Tenant.whatsapp_number.in_(wa_variants),
+		)
+	)
 
 	async with session_factory() as session:
 		result = await session.execute(statement)
