@@ -149,8 +149,8 @@ async def _build_welcome_message(chat_id: str) -> str:
         if not credentials or not credentials.schema_blueprint:
             return (
                 f"Hi! Welcome to {tenant.company_name}'s assistant.\n\n"
-                "Your database isn't configured yet. "
-                "Please contact your admin to complete setup."
+                "Your database isn't connected yet — I can't answer questions about your data until it is.\n\n"
+                "Send /adddb to connect your database. You'll get a secure link to set it up in a few seconds."
             )
 
         # Extract table names from blueprint
@@ -195,7 +195,8 @@ async def _build_help_message(chat_id: str) -> str:
                 "• How many records are there?\n"
                 "• Show me the latest entries\n"
                 "• Give me a summary of the data\n\n"
-                "Your database isn't configured yet — contact your admin to finish setup."
+                "Your database isn't connected yet. Send /adddb to set it up — "
+                "I'll send you a secure link to enter your connection details."
             )
 
         from .example_questions import generate_example_questions
