@@ -114,6 +114,13 @@ PLANNING INSTRUCTIONS:
 9a. NTH-ITEM REFERENCES: If the user refers to a specific position in a prior list ("2nd one", "the third", "the last article", "tell me about #4"), you MUST reuse the EXACT prior SQL from RECENT CHAT CONTEXT and only append `OFFSET (N-1) LIMIT 1` to it. Do NOT add or change an ORDER BY clause — the user's "2nd" refers to whatever order the previous query returned, even if that was insertion order. If the prior SQL already has ORDER BY, keep it identical.
 9b. REPLY-TO QUOTED MESSAGE: If a "USER IS REPLYING TO THIS EARLIER MESSAGE" block appears above with structured data (e.g. a numbered list of items), prefer matching by the exact title/name/value visible in that quoted text over re-deriving it from row ordering.
 10. COUNT + WHO/BY WHOM: GROUP BY appropriately.
+10a. CASE-INSENSITIVE GROUPING ON TEXT: When the user asks for counts/lists "by <text column>" (e.g. "by department", "by status", "by category"), use a normalised grouping key so that "Sales" and "sales" merge into one row. Pattern:
+    `SELECT LOWER(TRIM(col)) AS col_normalised, MAX(col) AS col_display, COUNT(*) AS n
+     FROM table
+     GROUP BY LOWER(TRIM(col))
+     ORDER BY n DESC;`
+    Apply this whenever the GROUP BY key is a free-form text column. Do NOT apply it to inherently case-sensitive identifiers (slugs, codes, IDs).
+10b. PENDING/STATUS — STABLE DEFINITION: Once you choose a "pending" interpretation for a tenant in one query (typically: a specific nullable date/status column IS NULL, see the auto_schema_hints "Status hint" lines), use the SAME interpretation for every follow-up "pending" question in the same conversation. Do not switch between "count of records where status IS NULL" and "count of records grouped by status name" between consecutive queries. Look at RECENT CHAT CONTEXT to see how "pending" was previously computed, and reuse that pattern.
 
 SQL REQUIREMENTS:
 - Declare aliases: FROM table AS alias

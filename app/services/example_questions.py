@@ -77,12 +77,27 @@ async def generate_example_questions(
         f"Given a database schema, suggest EXACTLY {count} short, friendly "
         "natural-language questions a non-technical business user could ask "
         "about this data.\n\n"
-        "Each question must be:\n"
+        "GROUNDING RULES — these are mandatory:\n"
+        "- Use ONLY the table names and column names that appear in the schema. "
+        "Do not invent tables or columns.\n"
+        "- DO NOT invent example values. Never substitute placeholder names "
+        "('John Doe', 'Acme Corp', 'example@email.com'), placeholder amounts "
+        "('$10k', '5 days', '100 units'), placeholder currencies (always omit "
+        "the currency symbol), or any other fabricated specific value.\n"
+        "- Phrase questions using the COLUMN NAME as the variable, not a "
+        "made-up value. Examples of the right style:\n"
+        "    ✓ 'Show me the tasks assigned to a person.' — leaves the name open.\n"
+        "    ✓ 'List parties by pending collection amount.' — no threshold.\n"
+        "    ✓ 'What is the latest expected payment date per party?' — uses real column.\n"
+        "    ✗ 'How many tasks did John Doe complete?' — invented name.\n"
+        "    ✗ 'List parties with collections over $10k.' — invented threshold + currency.\n"
+        "\n"
+        "STYLE RULES:\n"
         "- Natural human English, not SQL.\n"
-        "- Specific to the actual tables/columns in this schema (not generic).\n"
-        "- Useful for first-time users exploring what they can ask.\n"
         "- Short (under 10 words each).\n"
-        "- Varied: mix counts, lists, lookups, filters.\n\n"
+        "- Varied: mix counts, lists, lookups, filters, summaries.\n"
+        "- Useful for first-time users exploring what they can ask.\n"
+        "\n"
         f"You MUST return exactly {count} questions as a JSON object. Output "
         "ONLY the JSON object — no prose, no markdown fences, no commentary.\n"
         f"Shape: {json_skeleton}"
@@ -91,7 +106,9 @@ async def generate_example_questions(
     user_prompt = (
         f"DATABASE SCHEMA:\n{blueprint_snippet}\n\n"
         f"Generate EXACTLY {count} example questions in the required JSON format. "
-        f"The 'questions' array MUST contain exactly {count} items."
+        f"The 'questions' array MUST contain exactly {count} items. "
+        "Remember: use ONLY column names from the schema above; never invent "
+        "example values, names, amounts, or thresholds."
     )
 
     raw = ""
@@ -148,7 +165,7 @@ async def generate_example_questions(
                 continue
             q = q.strip().rstrip("?") + "?"
             q = re.sub(r"^[\s\-•*\d.\)]+", "", q).strip()
-            if 3 <= len(q) <= 120:
+            if 3 <= len(q) <= 120 and not _looks_invented(q):
                 questions.append(q)
 
         if not questions:
@@ -214,3 +231,41 @@ def _extract_outer_json_object(text: str) -> str | None:
             if depth == 0:
                 return text[start : i + 1]
     return None
+
+
+# ── Defense-in-depth: reject questions that contain invented values ────────
+# These patterns catch the most common LLM hallucinations even when the prompt
+# rules above are honored loosely. Schema-agnostic — works for any tenant.
+_INVENTED_PATTERNS = [
+    # Currency amounts: $100, ₹10k, €50, USD 1000, 50 USD, etc.
+    re.compile(r"[\$€£¥₹]\s*\d", re.IGNORECASE),
+    re.compile(r"\b\d+\s*(usd|inr|eur|gbp|jpy|rs|rupees|dollars|euros)\b", re.IGNORECASE),
+    # Numeric thresholds with k/m/b suffix: 10k, 5m, 100M, 1B.
+    re.compile(r"\b\d+\s*[kmb]\b", re.IGNORECASE),
+    # Common placeholder personal names. These are real names too, so this is a
+    # heuristic — only reject when paired with a typical "by/from/to <name>"
+    # context, which is what the LLM tends to invent.
+    re.compile(r"\b(john\s+doe|jane\s+doe|john\s+smith|jane\s+smith)\b", re.IGNORECASE),
+    # Common placeholder company names.
+    re.compile(r"\b(acme\s+(corp|inc|ltd)|example\s+(corp|inc|ltd|company))\b", re.IGNORECASE),
+    # Placeholder email addresses.
+    re.compile(r"\b(example|test|user|name)@", re.IGNORECASE),
+    # Lorem-ipsum and "abc" filler.
+    re.compile(r"\blorem\s+ipsum\b", re.IGNORECASE),
+]
+
+
+def _looks_invented(question: str) -> bool:
+    """Return True if the question contains a clearly invented value.
+
+    Defense-in-depth filter that drops questions slipping past the prompt rules.
+    Schema-agnostic — works for every tenant.
+    """
+    for pat in _INVENTED_PATTERNS:
+        if pat.search(question):
+            logger.debug(
+                "[EXAMPLES] Rejected invented-looking question: %r matched %r",
+                question, pat.pattern,
+            )
+            return True
+    return False

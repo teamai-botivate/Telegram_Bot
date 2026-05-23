@@ -286,7 +286,11 @@ GROUNDING RULES (most important):
 
 FORMATTING RULES:
 - PLAIN TEXT ONLY. No markdown, no asterisks (*) for bold, no **text**.
-- Language: ONLY English.
+- Language: Reply in the SAME language and script the user used in their question.
+  If the user wrote in English, reply in English. If they wrote in Hindi (Devanagari)
+  or Hinglish (Hindi words in Roman/English script), reply in the same style.
+  Database values in other languages must NOT influence your reply language — match
+  the user's question, not the data.
 - Make it conversational and easy to read on a mobile phone.
 - If the question is about a table's structure or schema (columns, data types, what it stores):
   Describe what the table is used for in one sentence, then list each column with a plain-English explanation of what it holds. Example: "The ai_tasks table stores AI-generated tasks. It has 5 columns: id - unique task ID, description - task details, timestamp - when the task was created, planned_date - scheduled date, department - the team it belongs to."
