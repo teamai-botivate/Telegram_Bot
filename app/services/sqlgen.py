@@ -109,6 +109,11 @@ PLANNING INSTRUCTIONS:
 5. For boolean columns → TRUE/FALSE, never text.
 6. Ignore tables starting with "extensions." or "pg_".
 7. MULTI-TABLE: If the question asks about multiple tables, query each table separately with UNION ALL.
+7a. UNION ALL MUST INCLUDE A SOURCE LABEL: Whenever you UNION ALL across multiple tables, the FIRST column of every branch MUST be a string literal naming the source (e.g. `'Checklist' AS source`). This is mandatory even for COUNT queries, because the user needs to know which number came from which table. Example:
+    `SELECT 'Checklist' AS source, COUNT(*) AS n FROM "Checklist" WHERE ...
+     UNION ALL
+     SELECT 'Delegation' AS source, COUNT(*) AS n FROM "Delegation" WHERE ...`
+    Returning unlabelled rows like `[{n: 423}, {n: 24}]` is unacceptable — the user will see "1. 423, 2. 24" with no context.
 8. USER TEXT VALUES: Use LOWER(TRIM(text_column)) = LOWER(TRIM('value')).
 9. FOLLOW-UP QUESTIONS: If the current question is short or vague (e.g. "list all of them", "show me", "what are they?"), look at the RECENT CHAT CONTEXT above and continue the previous query's subject. For example, if the prior message asked about tables and the user says "list all of them", query the same subject (table names).
 9a. NTH-ITEM REFERENCES: If the user refers to a specific position in a prior list ("2nd one", "the third", "the last article", "tell me about #4"), you MUST reuse the EXACT prior SQL from RECENT CHAT CONTEXT and only append `OFFSET (N-1) LIMIT 1` to it. Do NOT add or change an ORDER BY clause — the user's "2nd" refers to whatever order the previous query returned, even if that was insertion order. If the prior SQL already has ORDER BY, keep it identical.
@@ -258,15 +263,33 @@ def _extract_name_filters(question: str, auto_schema_hints: str | None) -> str:
     if not name_columns:
         return ""
 
-    # Match question against known values (case-insensitive, longest first)
-    question_lower = question.lower()
+    # Match question against known values, longest first. Two safeguards
+    # against false positives like "hai" matching "AI":
+    #   1. Word-boundary regex — the value must be a separate token, not
+    #      embedded inside a longer word.
+    #   2. Case-sensitive match for very short values (≤3 chars). Short
+    #      acronyms like "AI", "HR", "IT" only count when the USER typed
+    #      them in the same uppercase/title form as the stored value.
+    #      This stops "hai" (lowercase Hindi filler) from triggering "AI".
     found_filters: list[str] = []
 
     for col_name, values in name_columns.items():
         # Sort by length descending so "Am Sir" matches before "Am"
         for val in sorted(values, key=len, reverse=True):
-            if val.lower() in question_lower:
-                found_filters.append(f"{col_name} ILIKE '%{val}%'")
+            # Word-boundary check — value must be a separate token.
+            # Use the raw value for short codes (case-sensitive), lowercase
+            # for longer values (case-insensitive).
+            if len(val) <= 3:
+                # Short codes: require the user's typed casing to match.
+                # "AI" matches "given by AI" but NOT "hai".
+                pattern = r"\b" + re.escape(val) + r"\b"
+                if re.search(pattern, question):  # case-sensitive
+                    found_filters.append(f"{col_name} ILIKE '%{val}%'")
+            else:
+                # Longer values: case-insensitive word-boundary match.
+                pattern = r"\b" + re.escape(val.lower()) + r"\b"
+                if re.search(pattern, question.lower()):
+                    found_filters.append(f"{col_name} ILIKE '%{val}%'")
 
     if not found_filters:
         return ""
