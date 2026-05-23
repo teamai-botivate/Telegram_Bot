@@ -739,9 +739,10 @@ async def handle_message(msg: BotMessage) -> None:
                 await send_reply(msg, "Sorry, your onboarding link is invalid or expired. Please request a new link.")
                 return
 
-        if (msg.platform == Platform.TELEGRAM and text_normalized == "/start") or (
-            msg.platform == Platform.WHATSAPP and text_normalized == "start"
-        ):
+        # Commands accept both forms (with or without a leading "/") so users
+        # on WhatsApp — which doesn't surface slash commands natively — get
+        # the same behavior as Telegram users.
+        if text_normalized in ("/start", "start"):
             # First check if they're already a fully onboarded tenant.
             tenant = await get_tenant_by_chat_id(msg.chat_id)
             if tenant is not None:
@@ -767,14 +768,12 @@ async def handle_message(msg: BotMessage) -> None:
             )
             return
 
-        if text_normalized in ("help", "/help"):
+        if text_normalized in ("/help", "help"):
             help_msg = await _build_help_message(msg.chat_id)
             await send_reply(msg, help_msg)
             return
 
-        if (msg.platform == Platform.TELEGRAM and text_normalized == "/adddb") or (
-            msg.platform == Platform.WHATSAPP and text_normalized == "adddb"
-        ):
+        if text_normalized in ("/adddb", "adddb"):
             await _handle_adddb_command(msg)
             return
 
