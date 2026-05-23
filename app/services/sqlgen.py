@@ -113,7 +113,7 @@ PLANNING INSTRUCTIONS:
     `SELECT 'Checklist' AS source, COUNT(*) AS n FROM "Checklist" WHERE ...
      UNION ALL
      SELECT 'Delegation' AS source, COUNT(*) AS n FROM "Delegation" WHERE ...`
-    Returning unlabelled rows like `[{n: 423}, {n: 24}]` is unacceptable — the user will see "1. 423, 2. 24" with no context.
+    Returning unlabelled rows like `[{{n: 423}}, {{n: 24}}]` is unacceptable — the user will see "1. 423, 2. 24" with no context.
 8. USER TEXT VALUES: Use LOWER(TRIM(text_column)) = LOWER(TRIM('value')).
 9. FOLLOW-UP QUESTIONS: If the current question is short or vague (e.g. "list all of them", "show me", "what are they?"), look at the RECENT CHAT CONTEXT above and continue the previous query's subject. For example, if the prior message asked about tables and the user says "list all of them", query the same subject (table names).
 9a. NTH-ITEM REFERENCES: If the user refers to a specific position in a prior list ("2nd one", "the third", "the last article", "tell me about #4"), you MUST reuse the EXACT prior SQL from RECENT CHAT CONTEXT and only append `OFFSET (N-1) LIMIT 1` to it. Do NOT add or change an ORDER BY clause — the user's "2nd" refers to whatever order the previous query returned, even if that was insertion order. If the prior SQL already has ORDER BY, keep it identical.
